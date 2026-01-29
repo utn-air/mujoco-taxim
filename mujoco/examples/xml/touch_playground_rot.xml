@@ -42,13 +42,11 @@
         <!-- Primitives -->
         <!-- <geom name="can_geom" type="cylinder" pos="0 0 0.0" size="0.005 0.005" euler="1.571 0 0" rgba=".5 0 .7 1" friction="0.4" /> -->
         <!-- <geom name="can_geom" type="ellipsoid" pos="0 0 -0.003" size="0.005 0.002 0.002" euler="1.571 0 0" rgba=".5 0 .7 1" friction="0.4" /> -->
-        <geom name="can_geom" type="box" pos="0.00065 0 0.0" size="0.003 0.003 0.003" euler="1.571 0 0" rgba=".5 0 .7 1" friction="0.4" />
-        <geom name="box1" type="box" pos="0.00065 -0.0 0.0" size="0.011 0.0002 0.0002" euler="1.571 0 0" rgba=".5 0 .7 1" friction="0.4" />
-        <geom name="box2" type="box" pos="0.00065 -0.0 0.0" size="0.0002 0.0002 0.021" euler="1.571 0 0" rgba=".5 0 .7 1" friction="0.4" />
+        <!-- <geom name="can_geom" type="box" pos="0.00065 0 0.0" size="0.003 0.003 0.003" euler="1.571 0 0" rgba=".5 0 .7 1" friction="0.4" /> -->
         <!-- <geom name="can_geom" type="sphere" pos="0 0 0.0" size="0.005" euler="1.571 0 0" rgba=".5 0 .7 1" friction="0.4" /> -->
         <!-- <geom name="can_geom" type="capsule" pos="0 0 0.0" size="0.005 0.005" euler="1.571 0 0" rgba=".5 0 .7 1" friction="0.4" /> -->
         <!-- uv-sphere, bunny, hammer -->
-        <!-- <geom name="can_geom" type="mesh" mesh="can_mesh" pos="0 0 -0.00" euler="1.571 0.7 0" rgba=".5 0 .7 1" friction="0.4" />  -->
+        <geom name="can_geom" type="mesh" mesh="can_mesh" pos="0 0 -0.00" euler="1.571 0.7 0" rgba=".5 0 .7 1" friction="0.4" /> 
         <!-- Happy Buddha (happy.obj) -->
         <!-- <geom name="can_geom" type="mesh" mesh="can_mesh" pos="0 -0.015 -0.0" euler="0 3.142 0" rgba=".5 0 .7 1" friction="0.4" />  -->
         <!-- Armadillo -->
@@ -74,8 +72,9 @@
               <geom class="fingertip_pad_collision_4" name="fingertip_pad_collision_1_left_3_0" friction="2 0.05 0.0001"/>
               <!-- The xy position of the site depends on the mesh that you are placing it under, but this works well for the example one. -->
               <!-- You want the site's orientation to follow the pyrender camera orientation, where -Z points towards the object. -->
-              <site name="left_tacto_pad" pos="-0.014355 -0.0098 -0.063" euler="-1.57 0 1.57"/>
+              <!-- Calibrated pose for working with Taxim, specifically with digit_gripper fingerpad -->
               <!-- <geom name="visible_digit_surface" type="box" pos="-0.014355 -0.0098 -0.063" size="0.00638 0.002 0.008512" /> -->
+              <site name="left_tacto_pad" pos="-0.014355 -0.0098 -0.063" euler="-1.57 0 1.57"/>
           </body>
           <inertial mass="0.015" pos="0 0 0" diaginertia="2.375e-6 2.375e-6 7.5e-7" />
       </body>
