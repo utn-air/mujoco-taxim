@@ -396,7 +396,6 @@ class TaximSensor(object):
             sim_img = self.bg_proc.astype(np.float64)
             gt_height_map = np.zeros((psp.h, psp.w))
         else:
-            # breakpoint()
             obj_name = [*touch_data][0]
             wPs, wRs = self.sensor.get_pose()
             wTs = np.eye(4)
