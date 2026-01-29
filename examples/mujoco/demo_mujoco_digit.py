@@ -23,8 +23,7 @@ import numpy as np
 # Taxim imports 
 from os import path as osp
 
-sys.path.append(".") # Shitty hack
-from simOptical import TaximSensor
+from TaximSensor import TaximSensor
 
 np.set_printoptions(precision=3, suppress=True)
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))

@@ -9,9 +9,9 @@ import argparse
 
 import sys
 sys.path.append("..")
-import Basics.params as pr
-import Basics.sensorParams as psp
-from Basics.Geometry import Circle
+import TaximSensor.Basics.params as pr
+import TaximSensor.Basics.sensorParams as psp
+from TaximSensor.Basics.Geometry import Circle
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-data_path", nargs='?', default='../data/calib_ball/',

@@ -9,10 +9,15 @@ import cv2
 import mujoco as mj
 import sys
 import trimesh
-sys.path.append("../..")
-from Basics.CalibData import CalibData
-import Basics.params as pr
-import Basics.sensorParams as psp
+from TaximSensor.Basics.CalibData import CalibData
+import TaximSensor.Basics.params as pr
+import TaximSensor.Basics.sensorParams as psp
+
+__version__ = "0.1"  # Source of truth for mujoco-taxim's version
+
+_exported_dunders = {
+    "__version__",
+}
 
 def invert_homogeneous_matrix(T):
     R = T[:3, :3]

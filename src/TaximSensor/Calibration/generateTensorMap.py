@@ -7,7 +7,7 @@ from scipy import interpolate
 
 import sys
 sys.path.append("..")
-import Basics.sensorParams as psp
+import TaximSensor.Basics.sensorParams as psp
 
 def fill_blank(img):
     """

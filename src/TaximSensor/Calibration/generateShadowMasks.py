@@ -7,10 +7,9 @@ from scipy.ndimage import gaussian_filter
 import argparse
 
 import sys
-sys.path.append("..")
-from Basics.Geometry import Circle
-from Basics.RawData import RawData
-import Basics.params as pr
+from TaximSensor.Basics.Geometry import Circle
+from TaximSensor.Basics.RawData import RawData
+import TaximSensor.Basics.params as pr
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-data_path", nargs='?', default='../data/calib_pin/',
