@@ -5,14 +5,8 @@
 
 import logging
 import os
-import sys
-import time
 
-import cv2
-import hydra
-from omegaconf import OmegaConf
 import mujoco as mj
-import pyrender
 
 from mujoco.viewer import launch
 import glfw
@@ -21,8 +15,6 @@ from math import pi
 import numpy as np 
 
 # Taxim imports 
-from os import path as osp
-
 from TaximSensor import TaximSensor
 
 np.set_printoptions(precision=3, suppress=True)
