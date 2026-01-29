@@ -19,17 +19,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("-obj", nargs='?', default='square',
                     help="Name of Object to be tested, supported_objects_list = [square, cylinder6]")
 parser.add_argument('-depth', default = 1.0, type=float, help='Indetation depth into the gelpad.')
-parser.add_argument('-og', action='store_true')
 args = parser.parse_args()
 
-def invert_homogeneous_matrix(T):
-    R = T[:3, :3]
-    t = T[:3, 3]
-
-    T_inv = np.eye(4, dtype=T.dtype)
-    T_inv[:3, :3] = R.T
-    T_inv[:3, 3]  = -R.T @ t
-    return T_inv
 class simulator(object):
     def __init__(self, data_folder, filePath, obj):
         """
@@ -48,17 +39,15 @@ class simulator(object):
         self.verts_num = int(lines[3].split(' ')[-1])
         verts_lines = lines[10:10 + self.verts_num]
         self.vertices = np.array([list(map(float, l.strip().split(' '))) for l in verts_lines])
-        # self.vertices *= 1000
-        # transform = np.array([[1,0,0],[0,-1,0],[0,0,-1]])
-        # self.vertices = self.vertices.dot(transform)
+
         # polytable
-        calib_data = osp.join(data_folder, "digit", "polycalib.npz")
+        calib_data = osp.join(data_folder, "polycalib.npz")
         self.calib_data = CalibData(calib_data)
 
         # raw calibration data
-        rawData = osp.join(data_folder, "digit", "dataPack.npz")
+        rawData = osp.join(data_folder, "dataPack.npz")
         data_file = np.load(rawData,allow_pickle=True)
-        self.f0 = data_file['f0'] # initial frame, i.e. blank tactile image
+        self.f0 = data_file['f0']
         self.bg_proc = self.processInitialFrame()
 
         #shadow calibration
@@ -97,6 +86,7 @@ class simulator(object):
 
         for ch in range(f0.shape[2]):
             f0[:,:,ch][idx] = frame_mixing_per*f0[:,:,ch][idx] + (1-frame_mixing_per)*frame_[:,:,ch][idx]
+
         return f0
 
     def simulating(self, heightMap, contact_mask, contact_height, shadow=False):
@@ -114,7 +104,6 @@ class simulator(object):
 
         # generate gradients of the height map
         grad_mag, grad_dir = self.generate_normals(heightMap)
-        
 
         # generate raw simulated image without background
         sim_img_r = np.zeros((psp.h,psp.w,3))
@@ -176,9 +165,6 @@ class simulator(object):
         # get height index to shadow table
         contact_map = contact_height[contact_mask]
         height_idx = (contact_map * psp.pixmm - self.shadow_depth[0]) // pr.height_precision
-        if(height_idx.size == 0):
-            return sim_img, sim_img
-        
         height_idx_max = int(np.max(height_idx))
         total_height_idx = self.shadowTable.shape[2]
 
@@ -260,21 +246,15 @@ class simulator(object):
         mask_z = self.vertices[:,2] > 0.2
         mask_map = mask_u & mask_v & mask_z
         heightMap[vv[mask_map],uu[mask_map]] = self.vertices[mask_map][:,2]/psp.pixmm
-        print(np.max(heightMap), np.min(heightMap))
-        print(mask_u.sum(), mask_v.sum(), mask_z.sum(), mask_map.sum())
-        cv2.imwrite("heightmap_og.png", heightMap.astype(np.uint8))
 
         max_g = np.max(gel_map)
         min_g = np.min(gel_map)
         max_o = np.max(heightMap)
         # pressing depth in pixel
         pressing_height_pix = pressing_height_mm/psp.pixmm
-        print(pressing_height_mm, pressing_height_pix)
 
         # shift the gelpad to interact with the object
         gel_map = -1 * gel_map + (max_g+max_o-pressing_height_pix)
-        print(gel_map)
-        cv2.imwrite("gelmap_og.png", gel_map.astype(np.uint8))
 
         # get the contact area
         contact_mask = heightMap > gel_map
@@ -285,78 +265,6 @@ class simulator(object):
         zq[contact_mask]  = heightMap[contact_mask]
         zq[~contact_mask] = gel_map[~contact_mask]
         return zq, gel_map, contact_mask
-    
-    def generateHeightMapWithTransform(self, gelpad_model_path, wTs, wTo):
-        """
-        Generate the height map by interacting the object with the gelpad model.
-        Assuming that the object is expressed in sensor coordinate frame?
-        We know the pose of the mesh and the sensor in Mujoco.
-        Then based on the ply of the object, we need to essentially transform the vertices to the sensor frame.
-        1. Taxim is initialized with the object's vertices, and the vertices are in the world frame.
-        2. Upon contact, fetch the sensor's current pose in world frame, and compute the vertice pose in sensor frame. 
-
-
-        pressing_height_mm: pressing depth in millimeter
-        wTs: world to sensor transformation matrix
-        wTo: world to object transformation matrix
-        return:
-        zq: the interacted height map
-        gel_map: gelpad height map
-        contact_mask: indicate contact area
-        """
-        assert(self.vertices.shape[1] == 3)
-        # load dome-shape gelpad model
-        gel_map = np.load(gelpad_model_path)
-        gel_map = cv2.GaussianBlur(gel_map.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
-        heightMap = np.zeros((psp.h,psp.w))
-
-        # calculate sTo
-        sTw = invert_homogeneous_matrix(wTs)
-        # sTo = sTw @ wTo
-        wVertices_h = np.hstack((self.vertices.copy(), np.ones((self.vertices.shape[0], 1))))
-        wVertices_h = (wTo @ wVertices_h.T).T
-        sVertices_h = (sTw @ wVertices_h.T).T
-        print(np.mean(sVertices_h[:, 0]), np.mean(sVertices_h[:, 1]), np.min(sVertices_h[:, 2]))
-        # print(sTo)
-        # print(wTo)
-        # print(wTs)
-
-        # Change xy to sensor pixel coordinate
-        uu = (sVertices_h[:,0]/psp.pixmm + psp.w//2).astype(int)
-        vv = (sVertices_h[:,1]/psp.pixmm + psp.h//2).astype(int)
-        # Check boundary of the image 
-        mask_u = np.logical_and(uu > 0, uu < psp.w)
-        mask_v = np.logical_and(vv > 0, vv < psp.h)
-        # Check the depth
-        mask_z = sVertices_h[:,2] > 0.2
-        mask_map = mask_u & mask_v & mask_z
-        print(mask_u.sum(), mask_v.sum(), mask_z.sum(), mask_map.sum())
-        heightMap[vv[mask_map],uu[mask_map]] = sVertices_h[mask_map][:,2]/psp.pixmm
-        print(np.max(heightMap), np.min(heightMap))
-        print(heightMap.shape)
-        cv2.imwrite("heightmap_generate.png", heightMap.astype(np.uint8))
-        max_g = np.max(gel_map)
-        min_g = np.min(gel_map)
-        max_o = np.max(heightMap)
-        # pressing depth in pixel
-        pressing_height_mm = -1000.0*np.min(sVertices_h[:,2])
-        pressing_height_pix = pressing_height_mm/psp.pixmm
-        print(pressing_height_mm)
-
-        # shift the gelpad to interact with the object
-        gel_map = -1 * gel_map + (max_g+max_o-pressing_height_pix)
-        print(gel_map)
-        cv2.imwrite("gelmap_generate.png", gel_map.astype(np.uint8))
-
-        # get the contact area
-        contact_mask = heightMap > gel_map
-
-        # combine contact area of object shape with non contact area of gelpad shape
-        zq = np.zeros((psp.h,psp.w))
-
-        zq[contact_mask]  = heightMap[contact_mask]
-        zq[~contact_mask] = gel_map[~contact_mask]
-        return zq, gel_map, contact_mask, pressing_height_mm
 
     def deformApprox(self, pressing_height_mm, height_map, gel_map, contact_mask):
         zq = height_map.copy()
@@ -428,72 +336,19 @@ if __name__ == "__main__":
     gelpad_model_path = osp.join( '..', 'calibs', 'gelmap5.npy')
     obj = args.obj + '.ply'
     sim = simulator(data_folder, filePath, obj)
-    og = args.og
-    if not og:
-        print("With Transform")
-        wTs = np.eye(4) # Placeholder for world to sensor transformation
-        wTs[:3,:3] = np.array([[1, 0, 0],
-                              [0, 0.866, -0.5],
-                              [0, 0.5, 0.866]])
-        wTo = np.eye(4) # Placeholder for world to object transformation
-        '''
-        Main problem was due to not setting the depthh correctly
-        '''
+    press_depth = args.depth
+    dx = 0
+    dy = 0
 
-        # Centering the object definitely has an effect on the indentation position in the final picture
-        # and the deformation shifts accordingly
-        wTo[0,3] = -5.0
-        wTo[1,3] = -5.0
-        for i in range(0,1):
-            wTo[2,3] = - 1.91414 - (i * 0.0002)
-            
-            # generate height map
-            height_map, gel_map, contact_mask, press_depth = sim.generateHeightMapWithTransform(gelpad_model_path, wTs, wTo)
-            # approximate the soft deformation
-            
-            heightMap, contact_mask, contact_height = sim.deformApprox(press_depth, height_map, gel_map, contact_mask)
-            
-            # simulate tactile images
-            sim_img, shadow_sim_img = sim.simulating(heightMap, contact_mask, contact_height, shadow=True)
-            # img_savePath = osp.join('..', 'results', obj[:-4]+'_sim.jpg')
-            # shadow_savePath = osp.join('..', 'results', obj[:-4]+'_shadow.jpg')
-            # height_savePath = osp.join('..', 'results', obj[:-4]+'_height.npy')
-            print("Press depth (mm): ", press_depth)
-            cv2.imshow("simulated image", sim_img.astype(np.uint8))
-            cv2.waitKey(0) & 0xFF
-        img_savePath = osp.join('..', 'results', obj[:-4]+'_sim_tf.jpg')
-        shadow_savePath = osp.join('..', 'results', obj[:-4]+'_shadow_tf.jpg')
-        height_savePath = osp.join('..', 'results', obj[:-4]+'_height_tf.jpg')
-        cv2.imwrite(img_savePath, sim_img)
-        cv2.imwrite(shadow_savePath, shadow_sim_img)
-        cv2.imwrite(height_savePath, (heightMap/np.max(heightMap)*255).astype(np.uint8))
-
-    else:    
-        print("Without Transform")
-        # Original code without transform
-        press_depth = args.depth
-        dx = 0
-        dy = 0
-        # generate height map
-        height_map, gel_map, contact_mask = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy)
-        # approximate the soft deformation
-        heightMap, contact_mask, contact_height = sim.deformApprox(press_depth, height_map, gel_map, contact_mask)
-        # simulate tactile images
-        sim_img, shadow_sim_img = sim.simulating(heightMap, contact_mask, contact_height, shadow=True)
-        img_savePath = osp.join('..', 'results', obj[:-4]+'_sim.jpg')
-        shadow_savePath = osp.join('..', 'results', obj[:-4]+'_shadow.jpg')
-        height_savePath = osp.join('..', 'results', obj[:-4]+'_height.npy')
-        cv2.imshow("simulated image", sim_img.astype(np.uint8))
-        cv2.waitKey(0) & 0xFF
-        cv2.imwrite(img_savePath, sim_img)
-        cv2.imwrite(shadow_savePath, shadow_sim_img)
-        np.save(height_savePath, heightMap)
-
-'''
-I have the function now for creating the tactile image based on some transformation matrices
-1. Set up a mujoco playground similar to tacto
-2. Figure out the necessary matrix pipeline for getting wTs and wTo
-3. Apply and play around...
-4. Add some safeguards for depth, since Taxim seems a bit more sensitive to that
-
-'''
+    # generate height map
+    height_map, gel_map, contact_mask = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy)
+    # approximate the soft deformation
+    heightMap, contact_mask, contact_height = sim.deformApprox(press_depth, height_map, gel_map, contact_mask)
+    # simulate tactile images
+    sim_img, shadow_sim_img = sim.simulating(heightMap, contact_mask, contact_height, shadow=True)
+    img_savePath = osp.join('..', 'results', obj[:-4]+'_sim.jpg')
+    shadow_savePath = osp.join('..', 'results', obj[:-4]+'_shadow.jpg')
+    height_savePath = osp.join('..', 'results', obj[:-4]+'_height.npy')
+    cv2.imwrite(img_savePath, sim_img)
+    cv2.imwrite(shadow_savePath, shadow_sim_img)
+    np.save(height_savePath, heightMap)
