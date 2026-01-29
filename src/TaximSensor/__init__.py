@@ -92,23 +92,20 @@ class TaximSensor(object):
 
         # raw calibration data, here only used for background
         if bg_file is None:
-            rawData = f"{sensor_type}/dataPack.npz"
-            data_file = read_calib_np(rawData)
-            self.f0 = data_file['f0'] # initial frame, i.e. blank tactile image
-            self.bg_len = 1
+            data_file = read_calib_np(f"{sensor_type}/bg_set.npz")
         else:
-            data_file = read_calib_np(f"{sensor_type}/{bg_file}")
-            self.data_file = data_file['f0']
-            self.bgs = []
-            for i in range(self.data_file.shape[0]):
-                self.f0 = self.data_file[i]
-                self.bgs.append(self.processInitialFrame())
-            self.f0 = self.data_file[bg_index]
-            self.bg_proc = self.bgs[bg_index]
-            self.bg_len = self.data_file.shape[0]
-        self.bg_file = bg_file
+            data_file = np.load(bg_file, allow_pickle=True)
+        self.data_file = data_file['f0']
+        self.bgs = []
+        for i in range(self.data_file.shape[0]):
+            self.f0 = self.data_file[i]
+            self.bgs.append(self.processInitialFrame())
+        
+        self.f0 = self.data_file[bg_index]
+        self.bg_proc = self.bgs[bg_index]
+        self.bg_len = len(self.bgs)
         self.bg_index = bg_index
-        self.bg_proc = self.processInitialFrame()
+        self.bg_proc = self.bgs[bg_index]
 
         #shadow calibration
         self.shadow_depth = [0.4,0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2]
@@ -120,13 +117,13 @@ class TaximSensor(object):
         self.gel_map = cv2.GaussianBlur(self.gel_map.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
 
     def change_bg(self, bg_index):
-        if self.bg_file is not None:
-            if bg_index > self.data_file.shape[0]-1:
-                print("Warning: bg_index exceeds the number of available backgrounds. No change made.")
-                return
-            self.f0 = self.data_file[bg_index]
-            self.bg_proc = self.bgs[bg_index]
-            self.bg_index = bg_index
+        if bg_index > len(self.bgs)-1:
+            print("Warning: bg_index exceeds the number of available backgrounds. No change made.")
+            return
+        self.f0 = self.data_file[bg_index]
+        self.bg_proc = self.bgs[bg_index]
+        self.bg_index = bg_index
+
     def add_object_mujoco(self, obj_name, model, data, mesh_name=None, obj_type=mj.mjtObj.mjOBJ_BODY):
         """
         Add an object to the list of objects to be tracked by the sensor.
@@ -183,9 +180,7 @@ class TaximSensor(object):
             mesh_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_MESH, mesh_name)
             assert mesh_id >= 0, f"Mesh {mesh_name} not found in model."
             obj_pc = self.build_pointcloud_from_mujoco_mesh(model, mesh_id)
-        self.obj_pointclouds[obj_name] = obj_pc
-        # for checking
-        self.vertices = obj_pc * 1000 # need to x1000 to put it in mm coords
+        self.obj_pointclouds[obj_name] = obj_pc * 1000
 
     def add_body_mujoco(self, body, model, data, mesh_name=None):
         '''
@@ -401,16 +396,18 @@ class TaximSensor(object):
             sim_img = self.bg_proc.astype(np.float64)
             gt_height_map = np.zeros((psp.h, psp.w))
         else:
+            # breakpoint()
+            obj_name = [*touch_data][0]
             wPs, wRs = self.sensor.get_pose()
             wTs = np.eye(4)
             wTs[:3, :3] = wRs
             wTs[:3, 3] = wPs * 1000.0 # change to mm
-            wPo, wRo = self.object_links[[*touch_data][0]].get_pose()
+            wPo, wRo = self.object_links[obj_name].get_pose()
             wTo = np.eye(4)
             wTo[:3, :3] = wRo
             wTo[:3, 3] = wPo * 1000.0 # change to mm
 
-            height_map, gel_map, contact_mask, press_depth, gt_height_map = self.generateHeightMapWithTransform(wTs, wTo)
+            height_map, gel_map, contact_mask, press_depth, gt_height_map = self.generateHeightMapWithTransform(wTs, wTo, obj_name)
             heightMap, contact_mask, contact_height = self.deformApprox(press_depth, height_map, gel_map, contact_mask)
             sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
             sim_img = sim_img if not shadow else shadow_sim_img
@@ -602,55 +599,7 @@ class TaximSensor(object):
         shadow_sim_img = cv2.GaussianBlur(shadow_sim_img.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
         return sim_img, shadow_sim_img
 
-    def generateHeightMap(self, pressing_height_mm, dx, dy):
-        """
-        Generate the height map by interacting the object with the gelpad model.
-        pressing_height_mm: pressing depth in millimeter
-        dx, dy: shift of the object
-        return:
-        zq: the interacted height map
-        gel_map: gelpad height map
-        contact_mask: indicate contact area
-        """
-        assert(self.vertices.shape[1] == 3)
-        # load dome-shape gelpad model
-        gel_map = self.gel_map.copy()
-        heightMap = np.zeros((psp.h,psp.w))
-
-        # centralize the points
-        cx = np.mean(self.vertices[:,0])
-        cy = np.mean(self.vertices[:,1])
-        # add the shifting and change to the pix coordinate
-        uu = ((self.vertices[:,0] - cx)/psp.pixmm + psp.w//2+dx).astype(int)
-        vv = ((self.vertices[:,1] - cy)/psp.pixmm + psp.h//2+dy).astype(int)
-        # check boundary of the image
-        mask_u = np.logical_and(uu > 0, uu < psp.w)
-        mask_v = np.logical_and(vv > 0, vv < psp.h)
-        # check the depth
-        mask_z = self.vertices[:,2] > 0.2
-        mask_map = mask_u & mask_v & mask_z
-        heightMap[vv[mask_map],uu[mask_map]] = self.vertices[mask_map][:,2]/psp.pixmm
-
-        max_g = np.max(gel_map)
-        min_g = np.min(gel_map)
-        max_o = np.max(heightMap)
-        # pressing depth in pixel
-        pressing_height_pix = pressing_height_mm/psp.pixmm
-
-        # shift the gelpad to interact with the object
-        gel_map = -1 * gel_map + (max_g+max_o-pressing_height_pix)
-
-        # get the contact area
-        contact_mask = heightMap > gel_map
-
-        # combine contact area of object shape with non contact area of gelpad shape
-        zq = np.zeros((psp.h,psp.w))
-
-        zq[contact_mask]  = heightMap[contact_mask]
-        zq[~contact_mask] = gel_map[~contact_mask]
-        return zq, gel_map, contact_mask
-    
-    def generateHeightMapWithTransform(self, wTs, wTo):
+    def generateHeightMapWithTransform(self, wTs, wTo, obj_name):
         """
         Generate the height map by interacting the object with the gelpad model.
 
@@ -661,14 +610,14 @@ class TaximSensor(object):
         gel_map: gelpad height map
         contact_mask: indicate contact area
         """
-        assert(self.vertices.shape[1] == 3)
+        assert(self.obj_pointclouds[obj_name].shape[1] == 3)
         # load dome-shape gelpad model
         gel_map = self.gel_map.copy()
         heightMap = np.zeros((psp.h,psp.w))
 
         # calculate sTo
         sTw = invert_homogeneous_matrix(wTs)
-        wVertices_h = np.hstack((self.vertices.copy(), np.ones((self.vertices.shape[0], 1))))
+        wVertices_h = np.hstack((self.obj_pointclouds[obj_name].copy(), np.ones((self.obj_pointclouds[obj_name].shape[0], 1))))
         wVertices_h = (wTo @ wVertices_h.T).T
         sVertices_h = (sTw @ wVertices_h.T).T
 

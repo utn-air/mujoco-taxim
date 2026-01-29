@@ -116,7 +116,7 @@ def main():
     # Need to fetch the object mesh, parse it as a ply based on vertices, and then pass to simulator as str
     # Which means we need to specify which geom data taxim should look for
 
-    sim = TaximSensor(bg_file="bg_set.npz", bg_index=0)
+    sim = TaximSensor()
     sim.add_geom_mujoco("can_geom", model, data, "can_mesh")
     sim.add_camera_mujoco("left_tacto_pad", model, data)
     

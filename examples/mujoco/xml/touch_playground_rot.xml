@@ -42,11 +42,11 @@
         <!-- Primitives -->
         <!-- <geom name="can_geom" type="cylinder" pos="0 0 0.0" size="0.005 0.005" euler="1.571 0 0" rgba=".5 0 .7 1" friction="0.4" /> -->
         <!-- <geom name="can_geom" type="ellipsoid" pos="0 0 -0.003" size="0.005 0.002 0.002" euler="1.571 0 0" rgba=".5 0 .7 1" friction="0.4" /> -->
-        <!-- <geom name="can_geom" type="box" pos="0.00065 0 0.0" size="0.003 0.003 0.003" euler="1.571 0 0" rgba=".5 0 .7 1" friction="0.4" /> -->
+        <geom name="can_geom" type="box" pos="0.00065 0 0.0" size="0.003 0.003 0.003" euler="1.571 0 0" rgba=".5 0 .7 1" friction="0.4" />
         <!-- <geom name="can_geom" type="sphere" pos="0 0 0.0" size="0.005" euler="1.571 0 0" rgba=".5 0 .7 1" friction="0.4" /> -->
         <!-- <geom name="can_geom" type="capsule" pos="0 0 0.0" size="0.005 0.005" euler="1.571 0 0" rgba=".5 0 .7 1" friction="0.4" /> -->
         <!-- uv-sphere, bunny, hammer -->
-        <geom name="can_geom" type="mesh" mesh="can_mesh" pos="0 0 -0.00" euler="1.571 0.7 0" rgba=".5 0 .7 1" friction="0.4" /> 
+        <!-- <geom name="can_geom" type="mesh" mesh="can_mesh" pos="0 0 -0.00" euler="1.571 0.7 0" rgba=".5 0 .7 1" friction="0.4" />  -->
         <!-- Happy Buddha (happy.obj) -->
         <!-- <geom name="can_geom" type="mesh" mesh="can_mesh" pos="0 -0.015 -0.0" euler="0 3.142 0" rgba=".5 0 .7 1" friction="0.4" />  -->
         <!-- Armadillo -->
