@@ -1,29 +1,18 @@
 from dataclasses import dataclass
 from os import path as osp
 import numpy as np
-import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter
-from scipy.ndimage import correlate
 import scipy.ndimage as ndimage
 from scipy.spatial.transform import Rotation as R
 from scipy import interpolate
 import cv2
-import argparse
 import mujoco as mj
 import sys
 import trimesh
 sys.path.append("../..")
-from Basics.RawData import RawData
 from Basics.CalibData import CalibData
 import Basics.params as pr
 import Basics.sensorParams as psp
-
-parser = argparse.ArgumentParser()
-parser.add_argument("-obj", nargs='?', default='square',
-                    help="Name of Object to be tested, supported_objects_list = [square, cylinder6]")
-parser.add_argument('-depth', default = 1.0, type=float, help='Indetation depth into the gelpad.')
-parser.add_argument('-og', action='store_true')
-args = parser.parse_args()
 
 def invert_homogeneous_matrix(T):
     R = T[:3, :3]
@@ -55,23 +44,17 @@ class Link:
             # Get the world-space position and orientation (rotation matrix)
             position = self.mujoco_data.site_xpos[self.obj_id].copy()
             orientation = self.mujoco_data.site_xmat[self.obj_id].reshape(3, 3).copy()
-            # orientation = R.from_matrix(orientation).as_euler("xyz", degrees=False)
 
         # Pyrender camera has a RHS convention, but geoms use LHS; this makes it 90 deg off about x-axis
         elif self.obj_type == mj.mjtObj.mjOBJ_BODY:
             # For bodies, just xpos / xmat is fine
             position = self.mujoco_data.xpos[self.obj_id].copy()
-            # position[0] = -position[0] # camera in pyrender is left-handed
             orientation = self.mujoco_data.xmat[self.obj_id].reshape(3, 3).copy()
-            # orientation = R.from_matrix(orientation).as_euler("xyz", degrees=False)
-            # orientation[0] += np.pi/2 # essentially applying mujoco_to_pyrender_rotation
 
         elif self.obj_type == mj.mjtObj.mjOBJ_GEOM:
             # For geom, fetch from geom_*
             position = self.mujoco_data.geom_xpos[self.obj_id].copy()
             orientation = self.mujoco_data.geom_xmat[self.obj_id].reshape(3, 3).copy()
-            # orientation = R.from_matrix(orientation).as_euler("xyz", degrees=False)
-            # orientation[0] += np.pi/2 # essentially applying mujoco_to_pyrender_rotation
 
         else:
             # Handle other object types if needed
@@ -86,23 +69,13 @@ class TaximSensor(object):
         Initialize the simulator.
         1) load the calibration files,
         2) generate shadow table from shadow masks
-        
+        3) load the gelpad model
+
         :param self: Description
         :param data_folder: root path to calibration data
+        :param gelpad_model_path: path to the gelpad model numpy file
         '''
 
-        # Alternative: Read in obj as a raw string directly, passed from Trimesh
-
-        # read in object's ply file
-        # object facing positive direction of z axis
-        # objPath = osp.join(filePath,obj)
-        # self.obj_name = obj.split('.')[0]
-        # print("load object: " + self.obj_name)
-        # f = open(objPath)
-        # lines = f.readlines()
-        # self.verts_num = int(lines[3].split(' ')[-1])
-        # verts_lines = lines[10:10 + self.verts_num]
-        # self.vertices = np.array([list(map(float, l.strip().split(' '))) for l in verts_lines])
         self.obj_pointclouds = {}
         self.object_links = {}
         self.object_body_ids = set()
@@ -123,7 +96,8 @@ class TaximSensor(object):
         self.direction = shadowData['shadowDirections']
         self.shadowTable = shadowData['shadowTable']
 
-        self.gelpad_model_path = gelpad_model_path
+        self.gel_map = np.load(gelpad_model_path)
+        self.gel_map = cv2.GaussianBlur(self.gel_map.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
 
     def add_object_mujoco(self, obj_name, model, data, mesh_name=None, obj_type=mj.mjtObj.mjOBJ_BODY):
         """
@@ -199,8 +173,9 @@ class TaximSensor(object):
 
     def add_camera_mujoco(self, sensor_name, model, data):
         """
-        Add a camera for pyrender to the sensor. Doesn't actually add a camera to the mujoco model.
-        In addition, we store the associated site's body_id in tacto_body_ids for later use.
+        Queries the MuJoCo model for the site corresponding to the given sensor_name.
+        The site is associated with the plane that Taxim will render from.
+        In addition, we store the associated site's body_id in sensor_body_ids for later use.
         :param sensor_name: str
             Name of the sensor to be added. This is defined as a mujoco.sensor.touch_Grid plugin, and its name
               should match the name of its associated site in the mujoco model.
@@ -247,7 +222,6 @@ class TaximSensor(object):
         faces = model.mesh_face[start_face : start_face + num_face].reshape(-1, 3)
 
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
-        # mesh.apply_transform(self.mujoco_to_pyrender_rotation())
 
         # --- trimesh-built-in surface sampling ---
         if seed is not None:
@@ -255,9 +229,7 @@ class TaximSensor(object):
             points, _ = trimesh.sample.sample_surface(mesh, n_points, seed=rng)
         else:
             points, _ = trimesh.sample.sample_surface(mesh, n_points)
-        # print(len(mesh.vertices))
-        # points, _ = trimesh.sample.sample_surface(mesh, len(mesh.vertices))
-        # points = mesh.vertices
+        
         return np.asarray(points, dtype=np.float32)
 
 
@@ -410,15 +382,8 @@ class TaximSensor(object):
             wTo[:3, :3] = wRo
             wTo[:3, 3] = wPo * 1000.0 # change to mm
 
-            height_map, gel_map, contact_mask, press_depth, gt_height_map = self.generateHeightMapWithTransform(self.gelpad_model_path, wTs, wTo)
-            # print(press_depth)
-            # cv2.imshow("gelpad_map", height_map)
-            # cv2.imshow("contact_mask_gHMWT", contact_mask.astype(np.float32))
+            height_map, gel_map, contact_mask, press_depth, gt_height_map = self.generateHeightMapWithTransform(wTs, wTo)
             heightMap, contact_mask, contact_height = self.deformApprox(press_depth, height_map, gel_map, contact_mask)
-            
-            # cv2.imshow("contact_mask", contact_mask.astype(np.float32))
-            # cv2.imshow("contact_height", contact_height)
-            
             sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
             sim_img = sim_img if not shadow else shadow_sim_img
         
@@ -608,7 +573,7 @@ class TaximSensor(object):
         shadow_sim_img = cv2.GaussianBlur(shadow_sim_img.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
         return sim_img, shadow_sim_img
 
-    def generateHeightMap(self, gelpad_model_path, pressing_height_mm, dx, dy):
+    def generateHeightMap(self, pressing_height_mm, dx, dy):
         """
         Generate the height map by interacting the object with the gelpad model.
         pressing_height_mm: pressing depth in millimeter
@@ -620,8 +585,7 @@ class TaximSensor(object):
         """
         assert(self.vertices.shape[1] == 3)
         # load dome-shape gelpad model
-        gel_map = np.load(gelpad_model_path)
-        gel_map = cv2.GaussianBlur(gel_map.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
+        gel_map = self.gel_map.copy()
         heightMap = np.zeros((psp.h,psp.w))
 
         # centralize the points
@@ -657,7 +621,7 @@ class TaximSensor(object):
         zq[~contact_mask] = gel_map[~contact_mask]
         return zq, gel_map, contact_mask
     
-    def generateHeightMapWithTransform(self, gelpad_model_path, wTs, wTo):
+    def generateHeightMapWithTransform(self, wTs, wTo):
         """
         Generate the height map by interacting the object with the gelpad model.
 
@@ -670,13 +634,11 @@ class TaximSensor(object):
         """
         assert(self.vertices.shape[1] == 3)
         # load dome-shape gelpad model
-        gel_map = np.load(gelpad_model_path)
-        gel_map = cv2.GaussianBlur(gel_map.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
+        gel_map = self.gel_map.copy()
         heightMap = np.zeros((psp.h,psp.w))
 
         # calculate sTo
         sTw = invert_homogeneous_matrix(wTs)
-        sTo = sTw @ wTo
         wVertices_h = np.hstack((self.vertices.copy(), np.ones((self.vertices.shape[0], 1))))
         wVertices_h = (wTo @ wVertices_h.T).T
         sVertices_h = (sTw @ wVertices_h.T).T
@@ -720,7 +682,6 @@ class TaximSensor(object):
 
         # get the contact area 
         contact_mask = heightMap > gel_map # heightMap > gel_map
-        # cv2.imshow("contact_mask", contact_mask.astype(np.float32))
         # combine contact area of object shape with non contact area of gelpad shape
         zq = np.zeros((psp.h,psp.w))
 
@@ -735,16 +696,13 @@ class TaximSensor(object):
         # contact mask which is a little smaller than the real contact mask
         mask = (zq-(gel_map)) > pressing_height_pix * pr.contact_scale
         mask = mask & contact_mask
-        # cv2.imshow("deform mask", mask.astype(np.uint8)*255)
 
         # approximate soft body deformation with pyramid gaussian_filter
         for i in range(len(pr.pyramid_kernel_size)):
             zq = cv2.GaussianBlur(zq.astype(np.float32),(pr.pyramid_kernel_size[i],pr.pyramid_kernel_size[i]),0)
             zq[mask] = zq_back[mask]
         zq = cv2.GaussianBlur(zq.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
-        # cv2.imshow("zq heightmap", zq.astype(np.float32))
         contact_height = zq - gel_map
-        # cv2.imshow("contact height", contact_height.astype(np.float32))
         return zq, mask, contact_height
 
     def interpolate(self,img):
@@ -793,12 +751,3 @@ class TaximSensor(object):
     def padding(self,img):
         """ pad one row & one col on each side """
         return np.pad(img, ((1, 1), (1, 1)), 'symmetric')
-
-'''
-I have the function now for creating the tactile image based on some transformation matrices
-1. Set up a mujoco playground similar to tacto
-2. Figure out the necessary matrix pipeline for getting wTs and wTo
-3. Apply and play around...
-4. Add some safeguards for depth, since Taxim seems a bit more sensitive to that
-
-'''
