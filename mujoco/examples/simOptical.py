@@ -384,8 +384,7 @@ class TaximSensor(object):
         # TODO: Make the dict key distinct for different sensors
         return touch_data
 
-
-    def render_taxim(self, model, data):
+    def render_taxim(self, model, data, shadow=True, get_depth=True, visualize=True):
         '''
         Renders the taxim image based on the current mujoco state.
         1. Check for contact with self.get_force_mujoco
@@ -399,61 +398,52 @@ class TaximSensor(object):
         '''
         touch_data = self.get_force_mujoco(model, data)
         if touch_data is None:
-            return None # pass the background image eventually
-        wPs, wRs = self.sensor.get_pose()
-        wTs = np.eye(4)
-        wTs[:3, :3] = wRs
-        wTs[:3, 3] = wPs * 1000.0 # change to mm
-        wPo, wRo = self.object_links[[*touch_data][0]].get_pose()
-        wTo = np.eye(4)
-        wTo[:3, :3] = wRo
-        wTo[:3, 3] = wPo * 1000.0 # change to mm
+            sim_img = self.bg_proc.astype(np.float64)
+            gt_height_map = np.zeros((psp.h, psp.w))
+        else:
+            wPs, wRs = self.sensor.get_pose()
+            wTs = np.eye(4)
+            wTs[:3, :3] = wRs
+            wTs[:3, 3] = wPs * 1000.0 # change to mm
+            wPo, wRo = self.object_links[[*touch_data][0]].get_pose()
+            wTo = np.eye(4)
+            wTo[:3, :3] = wRo
+            wTo[:3, 3] = wPo * 1000.0 # change to mm
 
-        height_map, gel_map, contact_mask, press_depth = self.generateHeightMapWithTransform(self.gelpad_model_path, wTs, wTo)
-        # print(press_depth)
-        # cv2.imshow("gelpad_map", height_map)
-        # cv2.imshow("contact_mask_gHMWT", contact_mask.astype(np.float32))
-        heightMap, contact_mask, contact_height = self.deformApprox(press_depth, height_map, gel_map, contact_mask)
-        # cv2.imshow("heightmap", heightMap)
-        # cv2.imshow("contact_mask", contact_mask.astype(np.float32))
-        # cv2.imshow("contact_height", contact_height)
+            height_map, gel_map, contact_mask, press_depth, gt_height_map = self.generateHeightMapWithTransform(self.gelpad_model_path, wTs, wTo)
+            # print(press_depth)
+            # cv2.imshow("gelpad_map", height_map)
+            # cv2.imshow("contact_mask_gHMWT", contact_mask.astype(np.float32))
+            heightMap, contact_mask, contact_height = self.deformApprox(press_depth, height_map, gel_map, contact_mask)
+            
+            # cv2.imshow("contact_mask", contact_mask.astype(np.float32))
+            # cv2.imshow("contact_height", contact_height)
+            
+            sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
+            sim_img = sim_img if not shadow else shadow_sim_img
         
-        sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=False)
-        # sim_img = cv2.flip(sim_img, 0)
-        sim_img  = cv2.rotate(sim_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        cv2.imshow("taxim", np.clip(np.rint(sim_img), 0, 255).astype(np.uint8))
-        cv2.waitKey(1)
+        # add some gaussian noise to simulate real sensor noise
+        noise_sigma = 5
+        noise = np.random.normal(0, noise_sigma, sim_img.shape).astype(sim_img.dtype)
+        sim_img = cv2.add(sim_img, noise)
+        sim_img  = cv2.rotate(np.clip(np.rint(sim_img), 0, 255).astype(np.uint8), cv2.ROTATE_90_COUNTERCLOCKWISE)
         
-
-    def mj_get_mesh_transform(self, data, geom_name):
-        '''
-        Given the geom name that has 1:1 transform with the original mesh, obtain the current world pose in
-        simulation and return it as wTo
+        if(visualize):
+            if not get_depth:
+                combined_img = sim_img
+            else:
+                gt_height_map  = cv2.rotate(gt_height_map, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                # repeat height map to 3 channels
+                gt_vis = np.repeat(gt_height_map[:, :, np.newaxis], 3, axis=2)
+                gt_vis = (gt_vis / np.max(gt_vis) * 255).astype(np.uint8)
+                combined_img = np.concatenate((sim_img, gt_vis), axis=1)
+            cv2.imshow("taxim", combined_img)
+            cv2.waitKey(1)
+        if get_depth:
+            return sim_img, gt_height_map
+        else:
+            return sim_img, np.zeros((psp.w, psp.h))
         
-        :param data: mjData
-        :param geom_name: name of the geom
-        '''
-        pass
-
-    def mj_get_sensor_transform(self, data, sensor_name):
-        '''
-        Given the sensor name (a site), obtain its current world pose in simulation and return it as wTs
-        
-        :param self: Description
-        :param data: Description
-        :param sensor_name: Description
-        '''
-        pass
-
-    '''
-    During simulation, 
-    1. detect contact between site's host geom (the silicon pad) and the target geom
-    2. Calculate sTo
-    3. Handle safety margins wrt depth
-    4. Generate the image as per usual
-    '''
-
-
     def processInitialFrame(self):
         """
         Smooth the initial frame
@@ -670,14 +660,7 @@ class TaximSensor(object):
     def generateHeightMapWithTransform(self, gelpad_model_path, wTs, wTo):
         """
         Generate the height map by interacting the object with the gelpad model.
-        Assuming that the object is expressed in sensor coordinate frame?
-        We know the pose of the mesh and the sensor in Mujoco.
-        Then based on the ply of the object, we need to essentially transform the vertices to the sensor frame.
-        1. Taxim is initialized with the object's vertices, and the vertices are in the world frame.
-        2. Upon contact, fetch the sensor's current pose in world frame, and compute the vertice pose in sensor frame. 
 
-
-        pressing_height_mm: pressing depth in millimeter
         wTs: world to sensor transformation matrix
         wTo: world to object transformation matrix
         return:
@@ -690,12 +673,6 @@ class TaximSensor(object):
         gel_map = np.load(gelpad_model_path)
         gel_map = cv2.GaussianBlur(gel_map.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
         heightMap = np.zeros((psp.h,psp.w))
-
-        '''
-        Still need to look into the weird circular artifacts in the heightmap generation.
-        There seems to be some sort of maximum depth, beyond which the vertices are not registered properly.
-        Possibly to do with the gelpad parameters.
-        '''
 
         # calculate sTo
         sTw = invert_homogeneous_matrix(wTs)
@@ -727,7 +704,7 @@ class TaximSensor(object):
         heightMap = np.zeros((psp.h, psp.w), dtype=np.float32)  # or whatever default you want
         hit = np.isfinite(zbuf)
         heightMap[hit] = -zbuf[hit] / psp.pixmm
-        # cv2.imshow("heightMap", heightMap.astype(np.float32))        
+        heightMapBlur = cv2.GaussianBlur(heightMap.astype(np.float32)/heightMap.max(),(5,5),0)
         max_g = np.max(gel_map)
         min_g = np.min(gel_map)
         max_o = np.max(heightMap)
@@ -749,7 +726,7 @@ class TaximSensor(object):
 
         zq[contact_mask]  = heightMap[contact_mask]
         zq[~contact_mask] = gel_map[~contact_mask]
-        return zq, gel_map, contact_mask, pressing_height_mm
+        return zq, gel_map, contact_mask, pressing_height_mm, heightMapBlur
 
     def deformApprox(self, pressing_height_mm, height_map, gel_map, contact_mask):
         zq = height_map.copy()
