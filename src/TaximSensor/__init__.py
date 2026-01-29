@@ -123,6 +123,7 @@ class TaximSensor(object):
         if self.bg_file is not None:
             if bg_index > self.data_file.shape[0]-1:
                 print("Warning: bg_index exceeds the number of available backgrounds. No change made.")
+                return
             self.f0 = self.data_file[bg_index]
             self.bg_proc = self.bgs[bg_index]
             self.bg_index = bg_index
