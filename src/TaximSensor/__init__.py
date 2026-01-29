@@ -67,7 +67,7 @@ class Link:
 
 
 class TaximSensor(object):
-    def __init__(self, sensor_type="digit"):
+    def __init__(self, sensor_type="digit", bg_file=None, bg_index=0):
         '''
         Initialize the simulator.
         1) load the calibration files,
@@ -81,6 +81,7 @@ class TaximSensor(object):
         if sensor_type != "digit":
             raise NotImplementedError("Currently only digit sensor is supported.")
 
+        self.sensor_type = sensor_type
         self.obj_pointclouds = {}
         self.object_links = {}
         self.object_body_ids = set()
@@ -89,10 +90,24 @@ class TaximSensor(object):
         calib_data = f"{sensor_type}/polycalib.npz"
         self.calib_data = CalibData(calib_data)
 
-        # raw calibration data
-        rawData = f"{sensor_type}/dataPack.npz"
-        data_file = read_calib_np(rawData)
-        self.f0 = data_file['f0'] # initial frame, i.e. blank tactile image
+        # raw calibration data, here only used for background
+        if bg_file is None:
+            rawData = f"{sensor_type}/dataPack.npz"
+            data_file = read_calib_np(rawData)
+            self.f0 = data_file['f0'] # initial frame, i.e. blank tactile image
+            self.bg_len = 1
+        else:
+            data_file = read_calib_np(f"{sensor_type}/{bg_file}")
+            self.data_file = data_file['f0']
+            self.bgs = []
+            for i in range(self.data_file.shape[0]):
+                self.f0 = self.data_file[i]
+                self.bgs.append(self.processInitialFrame())
+            self.f0 = self.data_file[bg_index]
+            self.bg_proc = self.bgs[bg_index]
+            self.bg_len = self.data_file.shape[0]
+        self.bg_file = bg_file
+        self.bg_index = bg_index
         self.bg_proc = self.processInitialFrame()
 
         #shadow calibration
@@ -104,6 +119,13 @@ class TaximSensor(object):
         self.gel_map = read_calib_np("gelmap5.npy")
         self.gel_map = cv2.GaussianBlur(self.gel_map.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
 
+    def change_bg(self, bg_index):
+        if self.bg_file is not None:
+            if bg_index > self.data_file.shape[0]-1:
+                print("Warning: bg_index exceeds the number of available backgrounds. No change made.")
+            self.f0 = self.data_file[bg_index]
+            self.bg_proc = self.bgs[bg_index]
+            self.bg_index = bg_index
     def add_object_mujoco(self, obj_name, model, data, mesh_name=None, obj_type=mj.mjtObj.mjOBJ_BODY):
         """
         Add an object to the list of objects to be tracked by the sensor.
@@ -405,7 +427,8 @@ class TaximSensor(object):
                 gt_height_map  = cv2.rotate(gt_height_map, cv2.ROTATE_90_COUNTERCLOCKWISE)
                 # repeat height map to 3 channels
                 gt_vis = np.repeat(gt_height_map[:, :, np.newaxis], 3, axis=2)
-                gt_vis = (gt_vis / np.max(gt_vis) * 255).astype(np.uint8)
+                div = 1 if np.max(gt_vis) == 0 else np.max(gt_vis)
+                gt_vis = (gt_vis / div * 255).astype(np.uint8)
                 combined_img = np.concatenate((sim_img, gt_vis), axis=1)
             cv2.imshow("taxim", combined_img)
             cv2.waitKey(1)

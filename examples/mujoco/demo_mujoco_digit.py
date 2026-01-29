@@ -116,7 +116,7 @@ def main():
     # Need to fetch the object mesh, parse it as a ply based on vertices, and then pass to simulator as str
     # Which means we need to specify which geom data taxim should look for
 
-    sim = TaximSensor()
+    sim = TaximSensor(bg_file="bg_set.npz", bg_index=0)
     sim.add_geom_mujoco("can_geom", model, data, "can_mesh")
     sim.add_camera_mujoco("left_tacto_pad", model, data)
     
@@ -159,7 +159,7 @@ def main():
         data.qpos[model.joint("yy").qposadr] = qpos_holder['yy']
         data.qpos[model.joint("zz").qposadr] = qpos_holder['zz']
         mj.mj_step(model, data)
-        
+        sim.change_bg((sim.bg_index + 1) % sim.bg_len)
         sim.render_taxim(model, data)
 
         #   If you don't want to use the separate render thread, 
