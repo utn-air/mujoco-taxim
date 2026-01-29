@@ -38,12 +38,15 @@ dependencies = [
 RCS = "https://github.com/utn-mi/robot-control-stack"
 
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
 [tool.setuptools.packages.find]
 where = ["./src"]
 
 [tool.setuptools.package-data]
-TaximSensor = ["calibs/*"]
+TaximSensor = ["calibs/**/*"]
 
 [tool.setuptools.dynamic]
 version = { attr = "TaximSensor.__version__" }
-
