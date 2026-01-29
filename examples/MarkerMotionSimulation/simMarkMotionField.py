@@ -5,7 +5,8 @@ from os import path as osp
 import argparse
 import sys
 sys.path.append("..")
-import Basics.sensorParams as psp
+import TaximSensor.Basics.sensorParams as psp
+from TaximSensor.Basics.CalibData import read_calib_np
 from compose.dataLoader import dataLoader
 from compose.superposition import SuperPosition, fill_blank, cropMap
 
@@ -61,8 +62,7 @@ def getDomeHeightMap(filePath, obj, press_depth, domeMap):
 
 if __name__ == "__main__":
     # calibration file
-    data_folder = osp.join("..", "calibs", "femCalib.npz")
-    super = SuperPosition(data_folder)
+    super = SuperPosition("femCalib.npz")
 
     # compose
     filePath = osp.join('..', 'data', 'objects')
@@ -70,13 +70,14 @@ if __name__ == "__main__":
     local_deform = np.array([args.dx, args.dy, args.dz])
     press_depth = local_deform[2]
 
-    domeMap = np.load(osp.join('..', 'calibs', 'dome_gel.npy'))
+    domeMap = read_calib_np('dome_gel.npy')
     gel_map, contact_mask = getDomeHeightMap(filePath, obj, press_depth, domeMap)
     resultMap = super.compose_sparse(local_deform, gel_map, contact_mask)
 
     #### for visualization/saving the results ###
     compose_savePath = osp.join('..', 'results', args.obj+'_compose.jpg')
-
+    import os
+    os.makedirs(osp.join('..', 'results'), exist_ok=True)
     plt.figure(1)
     plt.subplot(311)
     fig = plt.imshow(fill_blank(resultMap[0,:,:]), cmap='RdBu')

@@ -118,16 +118,13 @@ def main():
     # #     "right_tacto_pad", model, data
     # # )
 
-    # This works so far
-    data_folder = osp.join(osp.join( "../../", "calibs"))
-    gelpad_model_path = osp.join( '../../', 'calibs', 'gelmap5.npy')
     
     # Need to step mujoco once to let the mesh data generate properly
 
     # Need to fetch the object mesh, parse it as a ply based on vertices, and then pass to simulator as str
     # Which means we need to specify which geom data taxim should look for
 
-    sim = TaximSensor(data_folder, gelpad_model_path, )
+    sim = TaximSensor()
     sim.add_geom_mujoco("can_geom", model, data, "can_mesh")
     sim.add_camera_mujoco("left_tacto_pad", model, data)
     

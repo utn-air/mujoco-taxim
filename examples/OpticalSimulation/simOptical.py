@@ -10,10 +10,10 @@ import argparse
 
 import sys
 sys.path.append("..")
-from Basics.RawData import RawData
-from Basics.CalibData import CalibData
-import Basics.params as pr
-import Basics.sensorParams as psp
+from TaximSensor.Basics.RawData import RawData
+from TaximSensor.Basics.CalibData import CalibData, read_calib_np
+import TaximSensor.Basics.params as pr
+import TaximSensor.Basics.sensorParams as psp
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-obj", nargs='?', default='square',
@@ -22,7 +22,7 @@ parser.add_argument('-depth', default = 1.0, type=float, help='Indetation depth 
 args = parser.parse_args()
 
 class simulator(object):
-    def __init__(self, data_folder, filePath, obj):
+    def __init__(self, filePath, obj):
         """
         Initialize the simulator.
         1) load the object,
@@ -41,18 +41,16 @@ class simulator(object):
         self.vertices = np.array([list(map(float, l.strip().split(' '))) for l in verts_lines])
 
         # polytable
-        calib_data = osp.join(data_folder, "polycalib.npz")
-        self.calib_data = CalibData(calib_data)
+        self.calib_data = CalibData("polycalib.npz")
 
         # raw calibration data
-        rawData = osp.join(data_folder, "dataPack.npz")
-        data_file = np.load(rawData,allow_pickle=True)
+        data_file = read_calib_np("dataPack.npz")
         self.f0 = data_file['f0']
         self.bg_proc = self.processInitialFrame()
 
         #shadow calibration
         self.shadow_depth = [0.4,0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2]
-        shadowData = np.load(osp.join(data_folder, "shadowTable.npz"),allow_pickle=True)
+        shadowData = read_calib_np("shadowTable.npz")
         self.direction = shadowData['shadowDirections']
         self.shadowTable = shadowData['shadowTable']
 
@@ -229,7 +227,7 @@ class simulator(object):
         """
         assert(self.vertices.shape[1] == 3)
         # load dome-shape gelpad model
-        gel_map = np.load(gelpad_model_path)
+        gel_map = read_calib_np(gelpad_model_path)
         gel_map = cv2.GaussianBlur(gel_map.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
         heightMap = np.zeros((psp.h,psp.w))
 
@@ -331,11 +329,10 @@ class simulator(object):
         return np.pad(img, ((1, 1), (1, 1)), 'symmetric')
 
 if __name__ == "__main__":
-    data_folder = osp.join(osp.join( "..", "calibs"))
     filePath = osp.join('..', 'data', 'objects')
-    gelpad_model_path = osp.join( '..', 'calibs', 'gelmap5.npy')
+    gelpad_model_path = 'gelmap5.npy'
     obj = args.obj + '.ply'
-    sim = simulator(data_folder, filePath, obj)
+    sim = simulator(filePath, obj)
     press_depth = args.depth
     dx = 0
     dy = 0
@@ -349,6 +346,9 @@ if __name__ == "__main__":
     img_savePath = osp.join('..', 'results', obj[:-4]+'_sim.jpg')
     shadow_savePath = osp.join('..', 'results', obj[:-4]+'_shadow.jpg')
     height_savePath = osp.join('..', 'results', obj[:-4]+'_height.npy')
+    import os
+    os.makedirs(osp.join('..', 'results'), exist_ok=True)
+    
     cv2.imwrite(img_savePath, sim_img)
     cv2.imwrite(shadow_savePath, shadow_sim_img)
     np.save(height_savePath, heightMap)

@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from os import path as osp
 import numpy as np
 from scipy.ndimage import gaussian_filter
 import scipy.ndimage as ndimage
@@ -7,9 +6,8 @@ from scipy.spatial.transform import Rotation as R
 from scipy import interpolate
 import cv2
 import mujoco as mj
-import sys
 import trimesh
-from TaximSensor.Basics.CalibData import CalibData
+from TaximSensor.Basics.CalibData import CalibData, read_calib_np
 import TaximSensor.Basics.params as pr
 import TaximSensor.Basics.sensorParams as psp
 
@@ -69,7 +67,7 @@ class Link:
 
 
 class TaximSensor(object):
-    def __init__(self, data_folder, gelpad_model_path):
+    def __init__(self, sensor_type="digit"):
         '''
         Initialize the simulator.
         1) load the calibration files,
@@ -79,29 +77,31 @@ class TaximSensor(object):
         :param self: Description
         :param data_folder: root path to calibration data
         :param gelpad_model_path: path to the gelpad model numpy file
-        '''
+        ''' 
+        if sensor_type != "digit":
+            raise NotImplementedError("Currently only digit sensor is supported.")
 
         self.obj_pointclouds = {}
         self.object_links = {}
         self.object_body_ids = set()
         self.saved=False 
         # polytable
-        calib_data = osp.join(data_folder, "digit", "polycalib.npz")
+        calib_data = f"{sensor_type}/polycalib.npz"
         self.calib_data = CalibData(calib_data)
 
         # raw calibration data
-        rawData = osp.join(data_folder, "digit", "dataPack.npz")
-        data_file = np.load(rawData,allow_pickle=True)
+        rawData = f"{sensor_type}/dataPack.npz"
+        data_file = read_calib_np(rawData)
         self.f0 = data_file['f0'] # initial frame, i.e. blank tactile image
         self.bg_proc = self.processInitialFrame()
 
         #shadow calibration
         self.shadow_depth = [0.4,0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2]
-        shadowData = np.load(osp.join(data_folder, "shadowTable.npz"),allow_pickle=True)
+        shadowData = read_calib_np("shadowTable.npz")
         self.direction = shadowData['shadowDirections']
         self.shadowTable = shadowData['shadowTable']
 
-        self.gel_map = np.load(gelpad_model_path)
+        self.gel_map = read_calib_np("gelmap5.npy")
         self.gel_map = cv2.GaussianBlur(self.gel_map.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
 
     def add_object_mujoco(self, obj_name, model, data, mesh_name=None, obj_type=mj.mjtObj.mjOBJ_BODY):

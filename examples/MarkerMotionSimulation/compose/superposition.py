@@ -11,9 +11,9 @@ from scipy import interpolate
 import sys
 sys.path.append("..")
 from compose.dataLoader import dataLoader
-sys.path.append("../..")
-import Basics.sensorParams as psp
-import Basics.params as pr
+import TaximSensor.Basics.sensorParams as psp
+import TaximSensor.Basics.params as pr
+from TaximSensor.Basics.CalibData import read_calib_np
 
 def cropMap(deformMap):
     # from d*d to h*w
@@ -44,7 +44,7 @@ def fill_blank(img):
 
 class SuperPosition:
     def __init__(self, data_folder):
-        femData = np.load(data_folder, allow_pickle=True)
+        femData = read_calib_np(data_folder)
         self.tensorMap = femData['tensorMap']
         self.sparse_mask = femData['nodeMask']
 

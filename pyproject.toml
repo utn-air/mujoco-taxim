@@ -42,7 +42,8 @@ RCS = "https://github.com/utn-mi/robot-control-stack"
 where = ["./src"]
 
 [tool.setuptools.package-data]
-TaximSensor = ["./calibs/*"]
+TaximSensor = ["calibs/*"]
 
 [tool.setuptools.dynamic]
 version = { attr = "TaximSensor.__version__" }
+
