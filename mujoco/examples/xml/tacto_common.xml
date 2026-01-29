@@ -1,0 +1,74 @@
+<mujoco model="fr3">
+    <compiler angle="radian" meshdir="assets" />
+
+    <option integrator="implicitfast" impratio="20" noslip_iterations="5" cone="elliptic">
+        <flag multiccd="enable" />
+    </option>
+    <custom>
+		<numeric
+			name="tcp_offset"
+			data="0.0 0.0 0.0466"
+	    />
+    </custom>
+    <default>
+        <default class="fr3">
+            <joint armature="0.1" damping="1" />
+            <position inheritrange="1" />
+            <default class="finger">
+                <joint axis="0 -1 0" type="slide" range="0 0.04" />
+            </default>
+            <default class="visual">
+                <geom type="mesh" group="2" contype="0" conaffinity="0" />
+            </default>
+            <default class="tacto_visual">
+                <geom type="mesh" group="2" contype="0" conaffinity="0" friction="0.4"/>
+            </default>
+            <default class="tacto_collision">
+                <geom type="mesh" group="3" mass="0" density="0" friction="10"/>
+            </default>
+            <default class="collision">
+                <geom type="mesh" group="3" mass="0" density="0" />
+                <default class="fingertip_pad_collision_1">
+                    <geom type="box" size="0.0022 0.0005 0.0030875" pos="-0.009 -0.01 -0.06"/>
+                </default>
+                <default class="fingertip_pad_collision_2">
+                    <geom type="box" size="0.0022 0.0005 0.0030875" pos="-0.019 -0.01 -0.06"/>
+                </default>
+                <default class="fingertip_pad_collision_3">
+                    <geom type="box" size="0.0022 0.0005 0.0030875" pos="-0.019 -0.01 -0.068"/>
+                </default>
+                <default class="fingertip_pad_collision_4">
+                    <geom type="box" size="0.0022 0.0005 0.0030875" pos="-0.009 -0.01 -0.068"/>
+                </default>
+            </default>
+            <!-- <site size="0.001" rgba="0.5 0.5 0.5 0.3" group="4" /> -->
+        </default>
+    </default>
+
+    <asset>
+        <material name="black" rgba=".2 .2 .2 1" />
+        <material name="white" rgba="1 1 1 1" />
+        <material name="red" rgba="1 0.072272 0.039546 1" />
+        <material name="gray" rgba="0.863156 0.863156 0.863157 1" />
+        <material name="button_green" rgba="0.102241 0.571125 0.102242 1" />
+        <material name="button_red" rgba="0.520996 0.008023 0.013702 1" />
+        <material name="button_blue" rgba="0.024157 0.445201 0.737911 1" />
+
+        <mesh file="assets/digit_gripper/digit_stub_full_0.obj" name="finger_0" />
+        <mesh file="assets/digit_gripper/digit_stub_full_1.obj" name="finger_1" />
+
+        <!-- for testing with demo_mujoco_digit.py -->
+        <!-- <mesh name="can_mesh" file="assets/target_objs/uv-sphere.obj" scale="0.001 0.001 0.001" /> -->
+        <mesh name="can_mesh" file="assets/target_objs/bunny.obj" scale="0.05 0.05 0.05" />
+        <!-- <mesh name="can_mesh" file="assets/target_objs/max-planck.obj" scale="0.00003 0.00003 0.00003" /> -->
+        <!-- <mesh name="can_mesh" file="assets/target_objs/armadillo.obj" scale="0.0001 0.0001 0.0001" /> -->
+        <!-- <mesh name="can_mesh" file="assets/target_objs/happy.obj" scale="0.1 0.1 0.1" /> -->
+        <!-- <mesh name="can_mesh" file="assets/target_objs/hammer.obj" scale="0.0002 0.0010 0.0002" /> -->
+
+        <material name="blue_material" specular="0.0" shininess="0.0" rgba="0.0000 0.0000 1 1" />
+        <material name="grey_material" specular="0.0" shininess="0.0" rgba="0.6471 0.6471 0.6471 1"/>
+        <material name="grey_material_tp" specular="0.0" shininess="0.0" rgba="0.6471 0.6471 0.6471 0.5"/>
+        <material name="green_material" specular="0.0" shininess="0.0" rgba="0.5137 0.7373 0.4078 1" />
+        <material name="red_material" specular="0.0" shininess="0.0" rgba="1 0 0 1"/>
+        </asset>
+</mujoco>
