@@ -11,7 +11,6 @@ from TaximSensor.Basics.CalibData import CalibData, read_calib_np
 import TaximSensor.Basics.params as pr
 import TaximSensor.Basics.sensorParams as psp
 from numba import njit
-
 __version__ = "0.1"  # Source of truth for mujoco-taxim's version
 
 _exported_dunders = {
@@ -514,6 +513,7 @@ class TaximSensor(object):
             wTo[:3, :3] = wRo
             wTo[:3, 3] = wPo * 1000.0 # change to mm
 
+            # f1: 0.025, deform: 0.025, sim: 0.15
             height_map, gel_map, contact_mask, press_depth, gt_height_map = self.generateHeightMapWithTransform(wTs, wTo, obj_name)
             heightMap, contact_mask, contact_height = self.deformApprox(press_depth, height_map, gel_map, contact_mask)
             sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
@@ -586,43 +586,34 @@ class TaximSensor(object):
         sim_img: simulated tactile image w/o shadow
         shadow_sim_img: simluated tactile image w/ shadow
         """
-
         # generate gradients of the height map
         grad_mag, grad_dir = self.generate_normals(heightMap)
-        
 
         # generate raw simulated image without background
-        sim_img_r = np.zeros((psp.h,psp.w,3))
+        if not hasattr(self, "_sim_img_r_buf") or self._sim_img_r_buf.shape != (psp.h, psp.w, 3):
+            self._sim_img_r_buf = np.zeros((psp.h, psp.w, 3), dtype=np.float32)
+        sim_img_r = self._sim_img_r_buf
+        sim_img_r.fill(0)
         bins = psp.numBins
 
-        [xx, yy] = np.meshgrid(range(psp.w), range(psp.h))
-        xf = xx.flatten()
-        yf = yy.flatten()
-        A = np.array([xf*xf,yf*yf,xf*yf,xf,yf,np.ones(psp.h*psp.w)]).T
+        A, xx, yy = self._get_poly_design_cache()
         binm = bins - 1
 
         # discritize grids
         x_binr = 0.5*np.pi/binm # x [0,pi/2]
         y_binr = 2*np.pi/binm # y [-pi, pi]
 
-        idx_x = np.floor(grad_mag/x_binr).astype('int')
-        idx_y = np.floor((grad_dir+np.pi)/y_binr).astype('int')
+        idx_x = np.floor(grad_mag/x_binr).astype(np.int32)
+        idx_y = np.floor((grad_dir+np.pi)/y_binr).astype(np.int32)
 
-        # look up polynomial table and assign intensity
         params_r = self.calib_data.grad_r[idx_x,idx_y,:]
-        params_r = params_r.reshape((psp.h*psp.w), params_r.shape[2])
         params_g = self.calib_data.grad_g[idx_x,idx_y,:]
-        params_g = params_g.reshape((psp.h*psp.w), params_g.shape[2])
         params_b = self.calib_data.grad_b[idx_x,idx_y,:]
-        params_b = params_b.reshape((psp.h*psp.w), params_b.shape[2])
 
-        est_r = np.sum(A * params_r,axis = 1)
-        est_g = np.sum(A * params_g,axis = 1)
-        est_b = np.sum(A * params_b,axis = 1)
-
-        sim_img_r[:,:,0] = est_r.reshape((psp.h,psp.w))
-        sim_img_r[:,:,1] = est_g.reshape((psp.h,psp.w))
-        sim_img_r[:,:,2] = est_b.reshape((psp.h,psp.w))
+        A_hw = A.reshape((psp.h,psp.w, -1))
+        sim_img_r[:,:,0] = np.einsum('hwk,hwk->hw', A_hw, params_r, optimize=True)
+        sim_img_r[:,:,1] = np.einsum('hwk,hwk->hw', A_hw, params_g, optimize=True)
+        sim_img_r[:,:,2] = np.einsum('hwk,hwk->hw', A_hw, params_b, optimize=True)
 
         # attach background to simulated image
         sim_img = sim_img_r + self.bg_proc
@@ -637,9 +628,8 @@ class TaximSensor(object):
         # find shadow attachment area
         kernel = np.ones((5, 5), np.uint8)
         dialate_mask = cv2.dilate(np.float32(contact_mask),kernel,iterations = 2)
-        enlarged_mask = dialate_mask == 1
-        boundary_contact_mask = 1*enlarged_mask - 1*contact_mask
-        contact_mask = boundary_contact_mask == 1
+        enlarged_mask = dialate_mask.astype(bool)
+        contact_mask = enlarged_mask & (~contact_mask.astype(bool))
 
         # (x,y) coordinates of all pixels to attach shadow
         x_coord = xx[contact_mask]
@@ -647,63 +637,132 @@ class TaximSensor(object):
 
         # get normal index to shadow table
         normMap = grad_dir[contact_mask] + np.pi
-        norm_idx = normMap // pr.discritize_precision
+        norm_idx = (normMap // pr.discritize_precision).astype(np.int32, copy=False)
+
         # get height index to shadow table
         contact_map = contact_height[contact_mask]
-        height_idx = (contact_map * psp.pixmm - self.shadow_depth[0]) // pr.height_precision
+        height_idx = ((contact_map * psp.pixmm - self.shadow_depth[0]) // pr.height_precision).astype(np.int32, copy=False)
         if(height_idx.size == 0):
             return sim_img, sim_img
         
+        # Shadow calculation
         height_idx_max = int(np.max(height_idx))
         total_height_idx = self.shadowTable.shape[2]
 
-        shadowSim = np.zeros((psp.h,psp.w,3))
+        H, W = psp.h, psp.w
+        shadowSim = np.zeros((H, W, 3), dtype=np.float32)
 
-        # all 3 channels
+        # Convert to numpy arrays for faster indexing
+        x0 = np.asarray(x_coord, dtype=np.int32)
+        y0 = np.asarray(y_coord, dtype=np.int32)
+        n0 = np.asarray(norm_idx, dtype=np.int32)
+        h0 = (np.asarray(height_idx, dtype=np.int32) + 6)
+
+        # Valid indices for shadowTable height dimension
+        valid = (h0 >= 0) & (h0 < total_height_idx)
+        x0 = x0[valid]; y0 = y0[valid]; n0 = n0[valid]; h0 = h0[valid]
+
+        # Cache trig fan per normal-bin n
+        if not hasattr(self, "_fan_trig_cache"):
+            self._fan_trig_cache = {}
+
+        # Precompute step indices once per unique profile length if you want, but
         for c in range(3):
-            frame = sim_img_r[:,:,c].copy()
-            frame_back = sim_img_r[:,:,c].copy()
-            for i in range(len(x_coord)):
-                # get the coordinates (x,y) of a certain pixel
-                cy_origin = y_coord[i]
-                cx_origin = x_coord[i]
-                # get the normal of the pixel
-                n = int(norm_idx[i])
-                # get height of the pixel
-                h = int(height_idx[i]) + 6
-                if h < 0 or h >= total_height_idx:
-                    continue
-                # get the shadow list for the pixel
-                v = self.shadowTable[c,n,h]
+            frame = sim_img_r[:, :, c].copy().astype(np.float32)
 
-                # number of steps
+            # Group pixels by (n, h) to reuse the same v and trig lists
+            keys = (n0.astype(np.int64) << 32) | h0.astype(np.int64)
+            order = np.argsort(keys)
+            keys_sorted = keys[order]
+
+            x_s = x0[order]
+            y_s = y0[order]
+            n_s = n0[order]
+            h_s = h0[order]
+
+            # Iterate groups of same (n,h)
+            start_idx = 0
+            while start_idx < len(keys_sorted):
+                key = keys_sorted[start_idx]
+                end_idx = start_idx + 1
+                while end_idx < len(keys_sorted) and keys_sorted[end_idx] == key:
+                    end_idx += 1
+
+                n = int(n_s[start_idx])
+                h = int(h_s[start_idx])
+
+                v = self.shadowTable[c, n, h]
                 num_step = len(v)
+                if num_step > 1:
+                    # cached fan trig for this normal
+                    trig = self._fan_trig_cache.get(n, None)
+                    if trig is None:
+                        d_theta = float(self.direction[n])
+                        theta_list = np.arange(d_theta - pr.fan_angle,
+                                            d_theta + pr.fan_angle,
+                                            pr.fan_precision,
+                                            dtype=np.float32)
+                        ct_list = np.cos(theta_list).astype(np.float32)
+                        st_list = np.sin(theta_list).astype(np.float32)
+                        self._fan_trig_cache[n] = (ct_list, st_list)
+                    else:
+                        ct_list, st_list = trig
 
-                # get the shadow direction
-                theta = self.direction[n]
-                d_theta = theta
-                ct = np.cos(d_theta)
-                st = np.sin(d_theta)
-                # use a fan of angles around the direction
-                theta_list = np.arange(d_theta-pr.fan_angle, d_theta+pr.fan_angle, pr.fan_precision)
-                ct_list = np.cos(theta_list)
-                st_list = np.sin(theta_list)
-                for theta_idx in range(len(theta_list)):
-                    ct = ct_list[theta_idx]
-                    st = st_list[theta_idx]
+                    # Vectorize steps s=1..num_step-1 once for this v
+                    s_arr = np.arange(1, num_step, dtype=np.float32)
+                    v_arr = np.asarray(v, dtype=np.float32)[1:]  # (S,)
 
-                    for s in range(1,num_step):
-                        cur_x = int(cx_origin + pr.shadow_step * s * ct)
-                        cur_y = int(cy_origin + pr.shadow_step * s * st)
-                        # check boundary of the image and height's difference
-                        if cur_x >= 0 and cur_x < psp.w and cur_y >= 0 and cur_y < psp.h and heightMap[cy_origin,cx_origin] > heightMap[cur_y,cur_x]:
-                            frame[cur_y,cur_x] = np.minimum(frame[cur_y,cur_x],v[s])
+                    # The pixels in this (n,h) group
+                    gx = x_s[start_idx:end_idx]
+                    gy = y_s[start_idx:end_idx]
 
-            shadowSim[:,:,c] = frame
-            shadowSim[:,:,c] = ndimage.gaussian_filter(shadowSim[:,:,c], sigma=(pr.sigma, pr.sigma), order=0)
+                    # Origin heights for occlusion test
+                    origin_h = heightMap[gy, gx]  # (P,)
 
-        shadow_sim_img = shadowSim+ self.bg_proc
-        shadow_sim_img = cv2.GaussianBlur(shadow_sim_img.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
+                    # For each fan direction, cast "rays" from all origins at once (vectorized over P and S)
+                    for ct, st in zip(ct_list, st_list):
+                        xs = (gx[:, None] + pr.shadow_step * s_arr[None, :] * ct).astype(np.int32)
+                        ys = (gy[:, None] + pr.shadow_step * s_arr[None, :] * st).astype(np.int32)
+
+                        inb = (xs >= 0) & (xs < W) & (ys >= 0) & (ys < H)
+                        if not np.any(inb):
+                            continue
+
+                        # Occlusion: origin height > target height
+                        # Only evaluate where in-bounds to avoid invalid indexing
+                        xs_in = xs[inb]
+                        ys_in = ys[inb]
+
+                        # Map inb mask to a flat list of (origin_index, step_index)
+                        # We need origin heights aligned with those flat coords:
+                        # origin index is row index of xs/ys in the (P,S) grid.
+                        # Compute it from inb positions:
+                        #   flat indices correspond to row-major flattening, so:
+                        #     origin_idx = flat_idx // S
+                        S = s_arr.shape[0]
+                        flat_inb = np.flatnonzero(inb.ravel())
+                        origin_idx = (flat_inb // S).astype(np.int32)
+
+                        occ = origin_h[origin_idx] > heightMap[ys_in, xs_in]
+                        if not np.any(occ):
+                            continue
+
+                        # Apply minimum update with corresponding v[s]
+                        # step index: flat_idx % S gives s-1 index into v_arr
+                        step_idx = (flat_inb % S).astype(np.int32)
+
+                        xs_hit = xs_in[occ]
+                        ys_hit = ys_in[occ]
+                        vv_hit = v_arr[step_idx[occ]]
+
+                        np.minimum.at(frame, (ys_hit, xs_hit), vv_hit)
+
+                start_idx = end_idx
+
+            shadowSim[:, :, c] = ndimage.gaussian_filter(frame, sigma=(pr.sigma, pr.sigma), order=0)
+
+        shadow_sim_img = shadowSim + self.bg_proc
+        shadow_sim_img = cv2.GaussianBlur(shadow_sim_img.astype(np.float32), (pr.kernel_size, pr.kernel_size), 0)
         return sim_img, shadow_sim_img
 
     def rasterize_depth_from_trimesh(
@@ -876,7 +935,6 @@ class TaximSensor(object):
         # except:
         #     pressing_height_mm = 0
 
-        print("Heightmap generation time:", end.total_seconds()*1000, "ms")
         pressing_height_pix = pressing_height_mm/psp.pixmm
         max_g = np.max(gel_map)
         min_g = np.min(gel_map)
@@ -956,3 +1014,23 @@ class TaximSensor(object):
     def padding(self,img):
         """ pad one row & one col on each side """
         return np.pad(img, ((1, 1), (1, 1)), 'symmetric')
+    
+    def _get_poly_design_cache(self):
+        cache_key = (psp.w, psp.h)
+        if getattr(self, "_poly_design_cache_key", None) != cache_key:
+            grid_x, grid_y = np.meshgrid(range(psp.w), range(psp.h))
+            flat_x = grid_x.flatten()
+            flat_y = grid_y.flatten()
+            # match original dtype behavior: np.array([...]).T -> float64
+            self._poly_design_cache = np.array(
+                [flat_x * flat_x,
+                flat_y * flat_y,
+                flat_x * flat_y,
+                flat_x,
+                flat_y,
+                np.ones(psp.w * psp.h)]
+            ).T
+            self._poly_design_cache_key = cache_key
+            self._xy_grid_cache = (grid_x, grid_y)  # also reuse xx,yy later
+        return self._poly_design_cache, self._xy_grid_cache[0], self._xy_grid_cache[1]
+            
