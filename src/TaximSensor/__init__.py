@@ -10,12 +10,67 @@ import trimesh
 from TaximSensor.Basics.CalibData import CalibData, read_calib_np
 import TaximSensor.Basics.params as pr
 import TaximSensor.Basics.sensorParams as psp
+from numba import njit
 
 __version__ = "0.1"  # Source of truth for mujoco-taxim's version
 
 _exported_dunders = {
     "__version__",
 }
+
+@njit(cache=True)
+def zbuf_rasterize_numba(us, vs, zs, H, W):
+    """
+    us,vs,zs: (F,3) float32 arrays of triangle vertex coords in pixel space (u,v) and depth z (mm)
+    Returns zbuf (H,W) float32 min-z per pixel.
+    """
+    zbuf = np.full((H, W), np.inf, dtype=np.float32)
+
+    F = us.shape[0]
+    for f in range(F):
+        u0, u1, u2 = us[f, 0], us[f, 1], us[f, 2]
+        v0, v1, v2 = vs[f, 0], vs[f, 1], vs[f, 2]
+        z0, z1, z2 = zs[f, 0], zs[f, 1], zs[f, 2]
+
+        # quick reject if triangle is entirely above gel and you only care about z<0
+        # (optional, but often helps)
+        if z0 >= 0.0 and z1 >= 0.0 and z2 >= 0.0:
+            continue
+
+        # bbox in pixel space
+        umin = int(np.floor(min(u0, u1, u2)))
+        umax = int(np.ceil (max(u0, u1, u2)))
+        vmin = int(np.floor(min(v0, v1, v2)))
+        vmax = int(np.ceil (max(v0, v1, v2)))
+
+        if umax < 0 or umin >= W or vmax < 0 or vmin >= H:
+            continue
+
+        if umin < 0: umin = 0
+        if umax > W - 1: umax = W - 1
+        if vmin < 0: vmin = 0
+        if vmax > H - 1: vmax = H - 1
+
+        denom = (v1 - v2) * (u0 - u2) + (u2 - u1) * (v0 - v2)
+        if denom == 0.0:
+            continue
+        inv_denom = 1.0 / denom
+
+        for v in range(vmin, vmax + 1):
+            py = v + 0.5
+            for u in range(umin, umax + 1):
+                px = u + 0.5
+
+                w0 = ((v1 - v2) * (px - u2) + (u2 - u1) * (py - v2)) * inv_denom
+                w1 = ((v2 - v0) * (px - u2) + (u0 - u2) * (py - v2)) * inv_denom
+                w2 = 1.0 - w0 - w1
+
+                if w0 >= 0.0 and w1 >= 0.0 and w2 >= 0.0:
+                    z = w0 * z0 + w1 * z1 + w2 * z2
+                    if z < zbuf[v, u]:
+                        zbuf[v, u] = z
+
+    return zbuf
 
 def invert_homogeneous_matrix(T):
     R = T[:3, :3]
@@ -679,50 +734,61 @@ class TaximSensor(object):
         vs = tris[..., 1] / pixmm + (H * 0.5)
         zs = tris[..., 2].astype(np.float32)
 
-        zbuf = np.full((H, W), np.inf, dtype=np.float32)
+        # --- Cull irrelevant triangles ---
+        u_min = np.min(us, axis=1); u_max = np.max(us, axis=1)
+        v_min = np.min(vs, axis=1); v_max = np.max(vs, axis=1)
 
-        # --- Rasterize each triangle into zbuf ---
-        for f in range(tris.shape[0]):
-            u0, u1, u2 = us[f]
-            v0, v1, v2 = vs[f]
-            z0, z1, z2 = zs[f]
+        in_img = (u_max >= 0) & (u_min < psp.w) & (v_max >= 0) & (v_min < psp.h)
+        penetrates = np.min(zs, axis=1) < 0.0  # at least one vertex below gel plane
 
-            # Pixel-space bounding box
-            umin = int(np.floor(min(u0, u1, u2)))
-            umax = int(np.ceil (max(u0, u1, u2)))
-            vmin = int(np.floor(min(v0, v1, v2)))
-            vmax = int(np.ceil (max(v0, v1, v2)))
+        keep = in_img & penetrates
+        us_k = us[keep]; vs_k = vs[keep]; zs_k = zs[keep]
+        us = us_k; vs = vs_k; zs = zs_k
 
-            # Quickly skip if outside image
-            if umax < 0 or umin >= W or vmax < 0 or vmin >= H:
-                continue
+        zbuf = zbuf_rasterize_numba(us, vs, zs, H, W)
+        # zbuf = np.full((H, W), np.inf, dtype=np.float32)
 
-            # Clip bbox to image
-            umin = max(umin, 0); umax = min(umax, W - 1)
-            vmin = max(vmin, 0); vmax = min(vmax, H - 1)
+        # # --- Rasterize each triangle into zbuf ---
+        # for f in range(us.shape[0]):
+        #     u0, u1, u2 = us[f]
+        #     v0, v1, v2 = vs[f]
+        #     z0, z1, z2 = zs[f]
 
-            # Degenerate triangle?
-            denom = (v1 - v2) * (u0 - u2) + (u2 - u1) * (v0 - v2)
-            if denom == 0.0:
-                continue
-            inv_denom = 1.0 / denom
+        #     # Pixel-space bounding box
+        #     umin = int(np.floor(min(u0, u1, u2)))
+        #     umax = int(np.ceil (max(u0, u1, u2)))
+        #     vmin = int(np.floor(min(v0, v1, v2)))
+        #     vmax = int(np.ceil (max(v0, v1, v2)))
 
-            # Rasterize bbox
-            for v in range(vmin, vmax + 1):
-                py = v + 0.5
-                for u in range(umin, umax + 1):
-                    px = u + 0.5
+        #     # Quickly skip if outside image
+        #     if umax < 0 or umin >= W or vmax < 0 or vmin >= H:
+        #         continue
 
-                    w0 = ((v1 - v2) * (px - u2) + (u2 - u1) * (py - v2)) * inv_denom
-                    w1 = ((v2 - v0) * (px - u2) + (u0 - u2) * (py - v2)) * inv_denom
-                    w2 = 1.0 - w0 - w1
+        #     # Clip bbox to image
+        #     umin = max(umin, 0); umax = min(umax, W - 1)
+        #     vmin = max(vmin, 0); vmax = min(vmax, H - 1)
 
-                    # Inside test (top-left rule not implemented; this is usually fine for sensor sim)
-                    if (w0 >= 0.0) and (w1 >= 0.0) and (w2 >= 0.0):
-                        z = w0 * z0 + w1 * z1 + w2 * z2
-                        if z < zbuf[v, u]:
-                            zbuf[v, u] = z
-        # breakpoint()
+        #     # Degenerate triangle?
+        #     denom = (v1 - v2) * (u0 - u2) + (u2 - u1) * (v0 - v2)
+        #     if denom == 0.0:
+        #         continue
+        #     inv_denom = 1.0 / denom
+
+        #     # Rasterize bbox
+        #     for v in range(vmin, vmax + 1):
+        #         py = v + 0.5
+        #         for u in range(umin, umax + 1):
+        #             px = u + 0.5
+
+        #             w0 = ((v1 - v2) * (px - u2) + (u2 - u1) * (py - v2)) * inv_denom
+        #             w1 = ((v2 - v0) * (px - u2) + (u0 - u2) * (py - v2)) * inv_denom
+        #             w2 = 1.0 - w0 - w1
+
+        #             # Inside test (top-left rule not implemented; this is usually fine for sensor sim)
+        #             if (w0 >= 0.0) and (w1 >= 0.0) and (w2 >= 0.0):
+        #                 z = w0 * z0 + w1 * z1 + w2 * z2
+        #                 if z < zbuf[v, u]:
+        #                     zbuf[v, u] = z
         return zbuf
     
     def heightmap_from_zbuf(self, zbuf: np.ndarray, pixmm: float) -> np.ndarray:
@@ -755,6 +821,10 @@ class TaximSensor(object):
         sTw = invert_homogeneous_matrix(wTs)
         sTo = sTw @ wTo
 
+        # Rasterization method takes ~3x more time than the original pointcloud method
+        # With bbox culling, 2x speedup
+        # with njit, 10x faster than original pc approach
+        
         # Rasterize the depth of the object in sensor frame
         zbuf = self.rasterize_depth_from_trimesh(
             self.obj_mesh[obj_name],
@@ -805,7 +875,8 @@ class TaximSensor(object):
         #     pressing_height_mm = min(3, -np.min(sVertices_h[:,2]))
         # except:
         #     pressing_height_mm = 0
-        
+
+        print("Heightmap generation time:", end.total_seconds()*1000, "ms")
         pressing_height_pix = pressing_height_mm/psp.pixmm
         max_g = np.max(gel_map)
         min_g = np.min(gel_map)
