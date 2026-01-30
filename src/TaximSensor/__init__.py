@@ -83,6 +83,7 @@ class TaximSensor(object):
 
         self.sensor_type = sensor_type
         self.obj_pointclouds = {}
+        self.obj_mesh = {}
         self.object_links = {}
         self.object_body_ids = set()
         self.saved=False 
@@ -170,17 +171,18 @@ class TaximSensor(object):
                 mesh_name = obj_name + "_mesh" if mesh_name is None else mesh_name
                 mesh_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_MESH, mesh_name)
                 assert mesh_id >= 0, f"Mesh {mesh_name} not found in model."
-                obj_pc = self.build_pointcloud_from_mujoco_mesh(model, mesh_id)
+                obj_pc, obj_mesh = self.build_pointcloud_from_mujoco_mesh(model, mesh_id)
             else:
-                obj_pc = self.build_pointcloud_from_mujoco_primitive(model, obj_id, geom_type)
+                obj_pc, obj_mesh = self.build_pointcloud_from_mujoco_primitive(model, obj_id, geom_type)
         else: 
             # if obj_type=BODY, we assume it has a corresponding mesh defined in the model
             # Construct the trimesh
             mesh_name = obj_name + "_mesh" if mesh_name is None else mesh_name
             mesh_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_MESH, mesh_name)
             assert mesh_id >= 0, f"Mesh {mesh_name} not found in model."
-            obj_pc = self.build_pointcloud_from_mujoco_mesh(model, mesh_id)
+            obj_pc, obj_mesh = self.build_pointcloud_from_mujoco_mesh(model, mesh_id)
         self.obj_pointclouds[obj_name] = obj_pc * 1000
+        self.obj_mesh[obj_name] = obj_mesh
 
     def add_body_mujoco(self, body, model, data, mesh_name=None):
         '''
@@ -217,7 +219,7 @@ class TaximSensor(object):
         self.sensor_body_id = model.site_bodyid[site_id]
         self.sensor_name = sensor_name
 
-    def build_pointcloud_from_mujoco_mesh(self, model, mesh_id, n_points=999999, seed=None):
+    def build_pointcloud_from_mujoco_mesh(self, model, mesh_id, n_points=9999999, seed=None):
         """
         Sample a point cloud (Nx3 numpy array) from a MuJoCo mesh using trimesh utilities.
 
@@ -253,7 +255,7 @@ class TaximSensor(object):
         else:
             points, _ = trimesh.sample.sample_surface(mesh, n_points)
         
-        return np.asarray(points, dtype=np.float32)
+        return np.asarray(points, dtype=np.float32), mesh
 
 
     def build_pointcloud_from_mujoco_primitive(self, model, geom_id, geom_type, n_points=999999, seed=None):
@@ -323,7 +325,7 @@ class TaximSensor(object):
         else:
             points, _ = trimesh.sample.sample_surface(mesh, n_points)
 
-        return np.asarray(points, dtype=np.float32)
+        return np.asarray(points, dtype=np.float32), mesh
 
 
     def get_force_mujoco(self, model, data):
@@ -379,6 +381,57 @@ class TaximSensor(object):
         # TODO: Make the dict key distinct for different sensors
         return touch_data
 
+    def render_taxim_named(self, model, data, name, shadow=True, get_depth=True, visualize=True):
+        '''
+        Renders the taxim image based on the current mujoco state.
+        1. Check for contact with self.get_force_mujoco
+        2. Fetch the wTs and wTo
+        3. Pass it to the simulator to generate the tactile image
+        4. Return the image
+        
+        :param self: Description
+        :param model: Description
+        :param data: Description
+        '''
+        
+        obj_name = name
+        wPs, wRs = self.sensor.get_pose()
+        wTs = np.eye(4)
+        wTs[:3, :3] = wRs
+        wTs[:3, 3] = wPs #* 1000.0 # change to mm
+        wPo, wRo = self.object_links[obj_name].get_pose()
+        wTo = np.eye(4)
+        wTo[:3, :3] = wRo
+        wTo[:3, 3] = wPo #* 1000.0 # change to mm
+
+        height_map, gel_map, contact_mask, press_depth, gt_height_map = self.generateHeightMapWithTransform(wTs, wTo, obj_name)
+        heightMap, contact_mask, contact_height = self.deformApprox(press_depth, height_map, gel_map, contact_mask)
+        sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
+        sim_img = sim_img if not shadow else shadow_sim_img
+        
+        # add some gaussian noise to simulate real sensor noise
+        noise_sigma = 5
+        noise = np.random.normal(0, noise_sigma, sim_img.shape).astype(sim_img.dtype)
+        sim_img = cv2.add(sim_img, noise)
+        sim_img  = cv2.rotate(np.clip(np.rint(sim_img), 0, 255).astype(np.uint8), cv2.ROTATE_90_COUNTERCLOCKWISE)
+        
+        if(visualize):
+            if not get_depth:
+                combined_img = sim_img
+            else:
+                gt_height_map  = cv2.rotate(gt_height_map, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                # repeat height map to 3 channels
+                gt_vis = np.repeat(gt_height_map[:, :, np.newaxis], 3, axis=2)
+                div = 1 if np.max(gt_vis) == 0 else np.max(gt_vis)
+                gt_vis = (gt_vis / div * 255).astype(np.uint8)
+                combined_img = np.concatenate((sim_img, gt_vis), axis=1)
+            cv2.imshow("taxim", combined_img)
+            cv2.waitKey(1)
+        if get_depth:
+            return sim_img, gt_height_map
+        else:
+            return sim_img, np.zeros((psp.w, psp.h))
+        
     def render_taxim(self, model, data, shadow=True, get_depth=True, visualize=True):
         '''
         Renders the taxim image based on the current mujoco state.
@@ -598,6 +651,90 @@ class TaximSensor(object):
         shadow_sim_img = cv2.GaussianBlur(shadow_sim_img.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
         return sim_img, shadow_sim_img
 
+    def rasterize_depth_from_trimesh(
+        self,
+        mesh: trimesh.Trimesh,
+        sTo: np.ndarray,
+        H: int,
+        W: int,
+        pixmm: float,
+    ) -> np.ndarray:
+        """
+        Returns zbuf (H,W) storing minimum z in *sensor frame* for each pixel.
+        z is in the same units as mesh coordinates (typically meters or mm).
+        """
+        # --- Transform mesh vertices into sensor frame ---
+
+        V = (mesh.vertices.astype(np.float32) * 1000)      # (V,3)
+        F = mesh.faces.astype(np.int32)                    # (F,3)
+
+        Vh = np.c_[V, np.ones((len(V), 1), dtype=np.float32)]
+        Vs = (sTo @ Vh.T).T[:, :3]                         # (V,3) in sensor frame
+
+        # Gather triangles in sensor frame: (F,3,3)
+        tris = Vs[F]
+
+        # --- Project triangle vertices to pixel coords (float) ---
+        us = tris[..., 0] / pixmm + (W * 0.5)
+        vs = tris[..., 1] / pixmm + (H * 0.5)
+        zs = tris[..., 2].astype(np.float32)
+
+        zbuf = np.full((H, W), np.inf, dtype=np.float32)
+
+        # --- Rasterize each triangle into zbuf ---
+        for f in range(tris.shape[0]):
+            u0, u1, u2 = us[f]
+            v0, v1, v2 = vs[f]
+            z0, z1, z2 = zs[f]
+
+            # Pixel-space bounding box
+            umin = int(np.floor(min(u0, u1, u2)))
+            umax = int(np.ceil (max(u0, u1, u2)))
+            vmin = int(np.floor(min(v0, v1, v2)))
+            vmax = int(np.ceil (max(v0, v1, v2)))
+
+            # Quickly skip if outside image
+            if umax < 0 or umin >= W or vmax < 0 or vmin >= H:
+                continue
+
+            # Clip bbox to image
+            umin = max(umin, 0); umax = min(umax, W - 1)
+            vmin = max(vmin, 0); vmax = min(vmax, H - 1)
+
+            # Degenerate triangle?
+            denom = (v1 - v2) * (u0 - u2) + (u2 - u1) * (v0 - v2)
+            if denom == 0.0:
+                continue
+            inv_denom = 1.0 / denom
+
+            # Rasterize bbox
+            for v in range(vmin, vmax + 1):
+                py = v + 0.5
+                for u in range(umin, umax + 1):
+                    px = u + 0.5
+
+                    w0 = ((v1 - v2) * (px - u2) + (u2 - u1) * (py - v2)) * inv_denom
+                    w1 = ((v2 - v0) * (px - u2) + (u0 - u2) * (py - v2)) * inv_denom
+                    w2 = 1.0 - w0 - w1
+
+                    # Inside test (top-left rule not implemented; this is usually fine for sensor sim)
+                    if (w0 >= 0.0) and (w1 >= 0.0) and (w2 >= 0.0):
+                        z = w0 * z0 + w1 * z1 + w2 * z2
+                        if z < zbuf[v, u]:
+                            zbuf[v, u] = z
+        # breakpoint()
+        return zbuf
+    
+    def heightmap_from_zbuf(self, zbuf: np.ndarray, pixmm: float) -> np.ndarray:
+        """
+        Matches your convention: keep only points below gel surface (z < 0),
+        and height = -z / pixmm.
+        """
+        height = np.zeros_like(zbuf, dtype=np.float32)
+        hit = np.isfinite(zbuf) & (zbuf < 0.0)
+        height[hit] = -zbuf[hit] / pixmm
+        return height
+
     def generateHeightMapWithTransform(self, wTs, wTo, obj_name):
         """
         Generate the height map by interacting the object with the gelpad model.
@@ -609,51 +746,70 @@ class TaximSensor(object):
         gel_map: gelpad height map
         contact_mask: indicate contact area
         """
-        assert(self.obj_pointclouds[obj_name].shape[1] == 3)
+        # assert(self.obj_pointclouds[obj_name].shape[1] == 3)
         # load dome-shape gelpad model
         gel_map = self.gel_map.copy()
         heightMap = np.zeros((psp.h,psp.w))
 
-        # calculate sTo
+        # calculate sTo: object-in-sensor-frame transform
         sTw = invert_homogeneous_matrix(wTs)
-        wVertices_h = np.hstack((self.obj_pointclouds[obj_name].copy(), np.ones((self.obj_pointclouds[obj_name].shape[0], 1))))
-        wVertices_h = (wTo @ wVertices_h.T).T
-        sVertices_h = (sTw @ wVertices_h.T).T
+        sTo = sTw @ wTo
 
-        # Change xy to sensor pixel coordinate
-        uu = (sVertices_h[:,0]/psp.pixmm + psp.w//2).astype(int)
-        vv = (sVertices_h[:,1]/psp.pixmm + psp.h//2).astype(int)
-        # Check boundary of the image 
-        mask_u = np.logical_and(uu > 0, uu < psp.w)
-        mask_v = np.logical_and(vv > 0, vv < psp.h)
-        # Check the depth
-        mask_z = sVertices_h[:,2] < 0 # 0 in gelpad coordinates.
-        mask_map = mask_u & mask_v & mask_z
+        # Rasterize the depth of the object in sensor frame
+        zbuf = self.rasterize_depth_from_trimesh(
+            self.obj_mesh[obj_name],
+            sTo,
+            psp.h,
+            psp.w,
+            psp.pixmm,
+        )
+        heightMap = self.heightmap_from_zbuf(zbuf, psp.pixmm)
+        # pressing depth in pixel
+        valid = np.isfinite(zbuf)          # pixels where mesh projects
+        if np.any(valid):
+            min_z = np.min(zbuf[valid])    # most negative z (deepest), or could be >0 if mesh is above gel
+            pressing_height_mm = min(3.0, max(0.0, -min_z))
+        else:
+            pressing_height_mm = 0.0
+            
+        # # Original approach
+        # # Convert vertices (sampled pc) to sensor frame
+        # wVertices_h = np.hstack((self.obj_pointclouds[obj_name].copy(), np.ones((self.obj_pointclouds[obj_name].shape[0], 1))))
+        # sVertices_h = (sTo @ wVertices_h.T).T
 
-        # Get the minimum z per pixel to avoid artifacts
-        u = uu[mask_map]
-        v = vv[mask_map]
-        z = sVertices_h[mask_map, 2]           # this is what you want to minimize per pixel
+        # # Change xy to sensor pixel coordinate
+        # uu = (sVertices_h[:,0]/psp.pixmm + psp.w//2).astype(int)
+        # vv = (sVertices_h[:,1]/psp.pixmm + psp.h//2).astype(int)
+        # # Check boundary of the image 
+        # mask_u = np.logical_and(uu > 0, uu < psp.w)
+        # mask_v = np.logical_and(vv > 0, vv < psp.h)
+        # # Check the depth, only keep points that are below the gelpad surface
+        # mask_z = sVertices_h[:,2] < 0 # 0 in gelpad coordinates.
+        # mask_map = mask_u & mask_v & mask_z
 
-        # 1) Build a depth buffer that stores the minimum z per pixel
-        zbuf = np.full((psp.h, psp.w), np.inf, dtype=np.float32)
-        np.minimum.at(zbuf, (v, u), z)     # for each (v,u), keep min(z)
+        # # Get the minimum z per pixel to avoid artifacts
+        # u = uu[mask_map]
+        # v = vv[mask_map]
+        # z = sVertices_h[mask_map, 2]           # this is what you want to minimize per pixel
 
-        # 2) Convert to heightMap (only where something hit)
-        heightMap = np.zeros((psp.h, psp.w), dtype=np.float32)  # or whatever default you want
-        hit = np.isfinite(zbuf)
-        heightMap[hit] = -zbuf[hit] / psp.pixmm
-        heightMapBlur = cv2.GaussianBlur(heightMap.astype(np.float32)/heightMap.max(),(5,5),0)
+        # # 1) Build a depth buffer that stores the minimum z per pixel
+        # zbuf = np.full((psp.h, psp.w), np.inf, dtype=np.float32)
+        # np.minimum.at(zbuf, (v, u), z)     # for each (v,u), keep min(z)
+
+        # # 2) Convert to heightMap (only where something hit)
+        # heightMap = np.zeros((psp.h, psp.w), dtype=np.float32)  # or whatever default you want
+        # hit = np.isfinite(zbuf)
+        # heightMap[hit] = -zbuf[hit] / psp.pixmm
+        # # pressing depth in pixel
+        # try:
+        #     pressing_height_mm = min(3, -np.min(sVertices_h[:,2]))
+        # except:
+        #     pressing_height_mm = 0
+        
+        pressing_height_pix = pressing_height_mm/psp.pixmm
         max_g = np.max(gel_map)
         min_g = np.min(gel_map)
         max_o = np.max(heightMap)
-        # pressing depth in pixel
-        try:
-            pressing_height_mm = min(3, -np.min(sVertices_h[:,2]))
-        except:
-            pressing_height_mm = 0
-        pressing_height_pix = pressing_height_mm/psp.pixmm
-
         # shift the gelpad to interact with the object
         gel_map = -1 * gel_map + (max_g+max_o-pressing_height_pix)
 
@@ -664,6 +820,7 @@ class TaximSensor(object):
 
         zq[contact_mask]  = heightMap[contact_mask]
         zq[~contact_mask] = gel_map[~contact_mask]
+        heightMapBlur = cv2.GaussianBlur(heightMap.astype(np.float32)/heightMap.max(),(5,5),0)
         return zq, gel_map, contact_mask, pressing_height_mm, heightMapBlur
 
     def deformApprox(self, pressing_height_mm, height_map, gel_map, contact_mask):
