@@ -173,3 +173,100 @@ def heightmap_from_zbuf(zbuf: np.ndarray, pixmm: float) -> np.ndarray:
     hit = np.isfinite(zbuf) & (zbuf < 0.0)
     height[hit] = -zbuf[hit] / pixmm
     return height
+
+import numpy as np
+
+def pointcloud_from_zbuf(
+    zbuf,
+    pixmm,
+    *,
+    contact_only=True,
+    n_points=None,
+    rng=None,
+    normalize = True,
+    z_max = 3.0,
+    include_border=False,
+    border_thickness=1,
+):
+    """
+    Build a point cloud (sensor frame, mm) from a z-buffer.
+
+    Args:
+      zbuf: (H,W) depth in sensor frame (mm), +inf for invalid
+      pixmm: mm per pixel
+      contact_only: if True, keep only z < 0 (penetration/contact)
+      n_points: if set, randomly downsample to this many points (applied AFTER border merge)
+      rng: np.random.Generator or None
+      include_border: if True, also include points along the image boundary (a 'frame' of points)
+      border_thickness: boundary thickness in pixels (>=1)
+      border_z_fill: z value (mm) used for border pixels where zbuf is invalid (inf).
+                     Common choices:
+                       0.0  -> gel plane
+                       min(zbuf[finite]) -> lowest visible depth (more conservative)
+    Returns:
+      pts: (N,3) float32 point cloud in sensor frame (mm)
+    """
+    H, W = zbuf.shape
+    zbuf_f = zbuf.astype(np.float32, copy=False)
+
+    # --- main valid mask ---
+    valid = np.isfinite(zbuf_f)
+    if contact_only:
+        valid &= (zbuf_f < 0.0)
+
+    vv, uu = np.nonzero(valid)
+    if vv.size > 0:
+        z = zbuf_f[vv, uu]
+        x = (uu.astype(np.float32) - (W * 0.5)) * float(pixmm)
+        y = (vv.astype(np.float32) - (H * 0.5)) * float(pixmm)
+        pts_main = np.stack([x, y, z], axis=1)
+    else:
+        pts_main = np.zeros((0, 3), dtype=np.float32)
+
+    # --- optional downsample (after border merge) ---
+    if n_points is not None and pts_main.shape[0] > int(n_points):
+        if rng is None:
+            rng = np.random.default_rng()
+        idx = rng.choice(pts_main.shape[0], size=int(n_points), replace=False)
+        pts_main = pts_main[idx]
+
+    # --- optional border points ---
+    if include_border:
+        t = int(border_thickness)
+        if t < 1:
+            t = 1
+        t = min(t, H // 2, W // 2)  # avoid weird cases
+
+        border = np.zeros((H, W), dtype=bool)
+        border[:t, :] = True
+        border[-t:, :] = True
+        border[:, :t] = True
+        border[:, -t:] = True
+
+        bv, bu = np.nonzero(border)
+        zb = zbuf_f[bv, bu]
+
+        # Fill all border depths with 0
+        zb_filled = np.zeros_like(zb, dtype=np.float32)
+
+        xb = (bu.astype(np.float32) - (W * 0.5)) * float(pixmm)
+        yb = (bv.astype(np.float32) - (H * 0.5)) * float(pixmm)
+        pts_border = np.stack([xb, yb, zb_filled.astype(np.float32)], axis=1)
+
+        pts = np.vstack([pts_main, pts_border]) if pts_main.size else pts_border
+    else:
+        pts = pts_main
+    
+    if normalize:
+        w_min = (0 - (W*0.5)) * float(pixmm)
+        w_max = (W - (W*0.5)) * float(pixmm)
+        h_min = (0 - (H*0.5)) * float(pixmm)
+        h_max = (H - (H*0.5)) * float(pixmm)
+        z_min = 0.0
+        z_max = z_max
+        pts[:,0] = (pts[:,0] - w_min) / (w_max - w_min)
+        pts[:,1] = (pts[:,1] - h_min) / (h_max - h_min)
+        pts[:,2] = (pts[:,2] - z_min) / (z_max - z_min)
+
+    
+    return pts.astype(np.float32)

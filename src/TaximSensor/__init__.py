@@ -11,7 +11,7 @@ from TaximSensor.Basics.CalibData import CalibData, read_calib_np
 import TaximSensor.Basics.params as pr
 import TaximSensor.Basics.sensorParams as psp
 import TaximSensor.Core as Core
-from TaximSensor.helpers import smooth_mesh, invert_homogeneous_matrix
+from TaximSensor.helpers import smooth_mesh, invert_homogeneous_matrix, smooth_heightmap_mm, build_trimesh_from_mujoco_mesh, build_trimesh_from_mujoco_primitive
 __version__ = "0.1"  # Source of truth for mujoco-taxim's version
 
 _exported_dunders = {
@@ -161,16 +161,16 @@ class TaximSensor(object):
                 mesh_name = obj_name + "_mesh" if mesh_name is None else mesh_name
                 mesh_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_MESH, mesh_name)
                 assert mesh_id >= 0, f"Mesh {mesh_name} not found in model."
-                obj_mesh = self.build_trimesh_from_mujoco_mesh(model, mesh_id)
+                obj_mesh = build_trimesh_from_mujoco_mesh(model, mesh_id)
             else:
-                obj_mesh = self.build_trimesh_from_mujoco_primitive(model, obj_id, geom_type)
+                obj_mesh = build_trimesh_from_mujoco_primitive(model, obj_id, geom_type)
         else: 
             # if obj_type=BODY, we assume it has a corresponding mesh defined in the model
             # Construct the trimesh
             mesh_name = obj_name + "_mesh" if mesh_name is None else mesh_name
             mesh_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_MESH, mesh_name)
             assert mesh_id >= 0, f"Mesh {mesh_name} not found in model."
-            obj_mesh = self.build_trimesh_from_mujoco_mesh(model, mesh_id)
+            obj_mesh = build_trimesh_from_mujoco_mesh(model, mesh_id)
         self.obj_mesh[obj_name] = smooth_mesh(obj_mesh)
 
     def add_body_mujoco(self, body, model, data, mesh_name=None):
@@ -207,99 +207,6 @@ class TaximSensor(object):
         # Remember what the associated site's body_id is for contact checking
         self.sensor_body_id = model.site_bodyid[site_id]
         self.sensor_name = sensor_name
-
-    def build_trimesh_from_mujoco_mesh(self, model, mesh_id):
-        """
-        Construct a trimesh.Mesh from a MuJoCo mesh using trimesh utilities.
-
-        Parameters
-        ----------
-        model : mjModel
-        mesh_id : int
-        n_points : int
-            Number of points to sample on the surface.
-        seed : int | None
-            Random seed for deterministic sampling.
-
-        Returns
-        -------
-        np.ndarray
-            (n_points, 3) float array of sampled points.
-        """
-        # --- build trimesh from MuJoCo mesh buffers (same as before) ---
-        start_vert = model.mesh_vertadr[mesh_id]
-        num_vert = model.mesh_vertnum[mesh_id]
-        vertices = model.mesh_vert[start_vert : start_vert + num_vert].reshape(-1, 3)
-
-        start_face = model.mesh_faceadr[mesh_id]
-        num_face = model.mesh_facenum[mesh_id]
-        faces = model.mesh_face[start_face : start_face + num_face].reshape(-1, 3)
-
-        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
-
-        return mesh
-
-
-    def build_trimesh_from_mujoco_primitive(self, model, geom_id, geom_type):
-        """
-        Construct a trimesh.Mesh from a MuJoCo primitive geom.
-        Parameters
-        ----------
-        model : mjModel
-        geom_id : int
-        geom_type : int
-            model.geom_type[geom_id]
-        n_points : int
-            Number of points to sample on the surface.
-        seed : int | None
-            Random seed for deterministic sampling.
-
-        Returns
-        -------
-        np.ndarray
-            (n_points, 3) float array of sampled points.
-        """
-        geom_type_map = {
-            2: "sphere",     # mjGEOM_SPHERE
-            3: "capsule",    # mjGEOM_CAPSULE
-            4: "ellipsoid",  # mjGEOM_ELLIPSOID
-            5: "cylinder",   # mjGEOM_CYLINDER
-            6: "box",        # mjGEOM_BOX
-        }
-
-        kind = geom_type_map.get(geom_type, None)
-        size = model.geom_size[geom_id]
-
-        if kind == "sphere":
-            radius = float(size[0])
-            mesh = trimesh.creation.icosphere(radius=radius)
-
-        elif kind == "cylinder":
-            radius = float(size[0])
-            height = float(2.0 * size[1])  # MuJoCo uses half-length
-            mesh = trimesh.creation.cylinder(radius=radius, height=height, sections=32)
-
-        elif kind == "box":
-            extents = (2.0 * size[:3]).astype(float)  # MuJoCo uses half-extents
-            mesh = trimesh.creation.box(extents=extents)
-
-        elif kind == "capsule":
-            radius = float(size[0])
-            height = float(2.0 * size[1])  # MuJoCo uses half-length (cyl part)
-            mesh = trimesh.creation.capsule(radius=radius, height=height, count=[32, 16])
-
-        elif kind == "ellipsoid":
-            # Approximate ellipsoid by scaling a unit sphere
-            mesh = trimesh.creation.icosphere(subdivisions=4, radius=1.0)
-            mesh.apply_scale(size[:3])
-
-        else:
-            raise NotImplementedError(
-                f"Primitive geom_type '{kind}' not supported or unknown (type id: {geom_type})"
-            )
-
-        return mesh
-
 
     def get_force_mujoco(self, model, data):
         """
@@ -369,13 +276,13 @@ class TaximSensor(object):
         wPs, wRs = self.sensor.get_pose()
         wTs = np.eye(4)
         wTs[:3, :3] = wRs
-        wTs[:3, 3] = wPs #* 1000.0 # change to mm
+        wTs[:3, 3] = wPs * 1000.0 # change to mm
         wPo, wRo = self.object_links[obj_name].get_pose()
         wTo = np.eye(4)
         wTo[:3, :3] = wRo
-        wTo[:3, 3] = wPo #* 1000.0 # change to mm
+        wTo[:3, 3] = wPo * 1000.0 # change to mm
 
-        height_map, gel_map, contact_mask, press_depth, gt_height_map = self.generateHeightMapWithTransform(wTs, wTo, obj_name)
+        height_map, gel_map, contact_mask, press_depth, gt_height_map, pc = self.generateHeightMapWithTransform(wTs, wTo, obj_name)
         heightMap, contact_mask, contact_height = Core.deformApprox(press_depth, height_map, gel_map, contact_mask)
         sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
         sim_img = sim_img if not shadow else shadow_sim_img
@@ -399,9 +306,9 @@ class TaximSensor(object):
             cv2.imshow("taxim", combined_img)
             cv2.waitKey(1)
         if get_depth:
-            return sim_img, gt_height_map
+            return sim_img, gt_height_map, pc
         else:
-            return sim_img, np.zeros((psp.w, psp.h))
+            return sim_img, np.zeros((psp.w, psp.h)), pc
         
     def render_taxim(self, model, data, shadow=True, get_depth=True, visualize=True):
         '''
@@ -419,6 +326,7 @@ class TaximSensor(object):
         if touch_data is None:
             sim_img = self.bg_proc.astype(np.float64)
             gt_height_map = np.zeros((psp.h, psp.w))
+            pc = np.array([])
         else:
             obj_name = [*touch_data][0]
             wPs, wRs = self.sensor.get_pose()
@@ -431,7 +339,7 @@ class TaximSensor(object):
             wTo[:3, 3] = wPo * 1000.0 # change to mm
 
             # f1: 0.025, deform: 0.025, sim: 0.15
-            height_map, gel_map, contact_mask, press_depth, gt_height_map = self.generateHeightMapWithTransform(wTs, wTo, obj_name)
+            height_map, gel_map, contact_mask, press_depth, gt_height_map, pc = self.generateHeightMapWithTransform(wTs, wTo, obj_name)
             heightMap, contact_mask, contact_height = Core.deformApprox(press_depth, height_map, gel_map, contact_mask)
             sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
             sim_img = sim_img if not shadow else shadow_sim_img
@@ -455,9 +363,9 @@ class TaximSensor(object):
             cv2.imshow("taxim", combined_img)
             cv2.waitKey(1)
         if get_depth:
-            return sim_img, gt_height_map
+            return sim_img, gt_height_map, pc
         else:
-            return sim_img, np.zeros((psp.w, psp.h))
+            return sim_img, np.zeros((psp.w, psp.h)), pc
         
     def processInitialFrame(self):
         """
@@ -682,7 +590,7 @@ class TaximSensor(object):
         shadow_sim_img = cv2.GaussianBlur(shadow_sim_img.astype(np.float32), (pr.kernel_size, pr.kernel_size), 0)
         return sim_img, shadow_sim_img
 
-    def generateHeightMapWithTransform(self, wTs, wTo, obj_name):
+    def generateHeightMapWithTransform(self, wTs, wTo, obj_name, pressing_mm_max = 3.0):
         """
         Generate the height map by interacting the object with the gelpad model.
 
@@ -714,11 +622,12 @@ class TaximSensor(object):
             psp.pixmm,
         )
         heightMap = Core.heightmap_from_zbuf(zbuf, psp.pixmm)
+        pointcloud = Core.pointcloud_from_zbuf(zbuf, psp.pixmm, n_points=10000, normalize=True, z_max=pressing_mm_max)
         # pressing depth in pixel
         valid = np.isfinite(zbuf)          # pixels where mesh projects
         if np.any(valid):
             min_z = np.min(zbuf[valid])    # most negative z (deepest), or could be >0 if mesh is above gel
-            pressing_height_mm = min(3.0, max(0.0, -min_z))
+            pressing_height_mm = min(pressing_mm_max, max(0.0, -min_z))
         else:
             pressing_height_mm = 0.0
             
@@ -737,7 +646,7 @@ class TaximSensor(object):
         zq[contact_mask]  = heightMap[contact_mask]
         zq[~contact_mask] = gel_map[~contact_mask]
         heightMapBlur = cv2.GaussianBlur(heightMap.astype(np.float32)/heightMap.max(),(5,5),0)
-        return zq, gel_map, contact_mask, pressing_height_mm, heightMapBlur
+        return zq, gel_map, contact_mask, pressing_height_mm, heightMapBlur, pointcloud
     
     def _get_poly_design_cache(self):
         cache_key = (psp.w, psp.h)
