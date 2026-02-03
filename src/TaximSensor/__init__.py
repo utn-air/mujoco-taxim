@@ -94,10 +94,10 @@ class TaximSensor(object):
             self.bgs.append(self.processInitialFrame())
         
         self.f0 = self.data_file[bg_index]
-        self.bg_proc = self.bgs[bg_index]
         self.bg_len = len(self.bgs)
         self.bg_index = bg_index
         self.bg_proc = self.bgs[bg_index]
+        self.bg_proc_rot = cv2.rotate(np.clip(np.rint(self.bg_proc.copy()), 0, 255).astype(np.uint8), cv2.ROTATE_90_COUNTERCLOCKWISE)
 
         #shadow calibration
         self.shadow_depth = [0.4,0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2]
@@ -114,6 +114,7 @@ class TaximSensor(object):
             return
         self.f0 = self.data_file[bg_index]
         self.bg_proc = self.bgs[bg_index]
+        self.bg_proc_rot = cv2.rotate(np.clip(np.rint(self.bg_proc.copy()), 0, 255).astype(np.uint8), cv2.ROTATE_90_COUNTERCLOCKWISE)
         self.bg_index = bg_index
 
     def add_object_mujoco(self, obj_name, model, data, mesh_name=None, obj_type=mj.mjtObj.mjOBJ_BODY):
@@ -282,7 +283,7 @@ class TaximSensor(object):
         wTo[:3, :3] = wRo
         wTo[:3, 3] = wPo * 1000.0 # change to mm
 
-        height_map, gel_map, contact_mask, press_depth, gt_height_map, pc = self.generateHeightMapWithTransform(wTs, wTo, obj_name)
+        height_map, gel_map, contact_mask, press_depth, gt_height_map, pcn = self.generateHeightMapWithTransform(wTs, wTo, obj_name)
         heightMap, contact_mask, contact_height = Core.deformApprox(press_depth, height_map, gel_map, contact_mask)
         sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
         sim_img = sim_img if not shadow else shadow_sim_img
@@ -306,9 +307,9 @@ class TaximSensor(object):
             cv2.imshow("taxim", combined_img)
             cv2.waitKey(1)
         if get_depth:
-            return sim_img, gt_height_map, pc
+            return sim_img, gt_height_map, pcn
         else:
-            return sim_img, np.zeros((psp.w, psp.h)), pc
+            return sim_img, np.zeros((psp.w, psp.h)), pcn
         
     def render_taxim(self, model, data, shadow=True, get_depth=True, visualize=True):
         '''
@@ -326,7 +327,7 @@ class TaximSensor(object):
         if touch_data is None:
             sim_img = self.bg_proc.astype(np.float64)
             gt_height_map = np.zeros((psp.h, psp.w))
-            pc = np.array([])
+            pcn = np.array([])
         else:
             obj_name = [*touch_data][0]
             wPs, wRs = self.sensor.get_pose()
@@ -339,7 +340,7 @@ class TaximSensor(object):
             wTo[:3, 3] = wPo * 1000.0 # change to mm
 
             # f1: 0.025, deform: 0.025, sim: 0.15
-            height_map, gel_map, contact_mask, press_depth, gt_height_map, pc = self.generateHeightMapWithTransform(wTs, wTo, obj_name)
+            height_map, gel_map, contact_mask, press_depth, gt_height_map, pcn = self.generateHeightMapWithTransform(wTs, wTo, obj_name)
             heightMap, contact_mask, contact_height = Core.deformApprox(press_depth, height_map, gel_map, contact_mask)
             sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
             sim_img = sim_img if not shadow else shadow_sim_img
@@ -363,9 +364,9 @@ class TaximSensor(object):
             cv2.imshow("taxim", combined_img)
             cv2.waitKey(1)
         if get_depth:
-            return sim_img, gt_height_map, pc
+            return sim_img, gt_height_map, pcn
         else:
-            return sim_img, np.zeros((psp.w, psp.h)), pc
+            return sim_img, np.zeros((psp.w, psp.h)), pcn
         
     def processInitialFrame(self):
         """
@@ -622,7 +623,10 @@ class TaximSensor(object):
             psp.pixmm,
         )
         heightMap = Core.heightmap_from_zbuf(zbuf, psp.pixmm)
-        pointcloud = Core.pointcloud_from_zbuf(zbuf, psp.pixmm, n_points=10000, normalize=True, z_max=pressing_mm_max)
+        n_points = 5000
+        pcn = Core.pointcloud_from_zbuf_with_normals(zbuf, psp.pixmm, n_points=n_points)
+        assert pcn.shape[0] == n_points, "Pointcloud does not have the expected number of points."
+
         # pressing depth in pixel
         valid = np.isfinite(zbuf)          # pixels where mesh projects
         if np.any(valid):
@@ -646,7 +650,7 @@ class TaximSensor(object):
         zq[contact_mask]  = heightMap[contact_mask]
         zq[~contact_mask] = gel_map[~contact_mask]
         heightMapBlur = cv2.GaussianBlur(heightMap.astype(np.float32)/heightMap.max(),(5,5),0)
-        return zq, gel_map, contact_mask, pressing_height_mm, heightMapBlur, pointcloud
+        return zq, gel_map, contact_mask, pressing_height_mm, heightMapBlur, pcn
     
     def _get_poly_design_cache(self):
         cache_key = (psp.w, psp.h)

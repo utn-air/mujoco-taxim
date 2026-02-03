@@ -174,8 +174,6 @@ def heightmap_from_zbuf(zbuf: np.ndarray, pixmm: float) -> np.ndarray:
     height[hit] = -zbuf[hit] / pixmm
     return height
 
-import numpy as np
-
 def pointcloud_from_zbuf(
     zbuf,
     pixmm,
@@ -270,3 +268,190 @@ def pointcloud_from_zbuf(
 
     
     return pts.astype(np.float32)
+
+import numpy as np
+import cv2
+
+def pointcloud_from_zbuf_with_normals(
+    zbuf,
+    pixmm,
+    *,
+    normalize=True,
+    z_max=3.0,
+    contact_only=True,
+    n_points=None,
+    rng=None,
+    include_border=False,
+    border_thickness=1,
+    border_z_fill=0.0,
+    inpaint_for_normals=True,
+    inpaint_radius_px=3,
+):
+    """
+    Build a point cloud + per-point normals from a z-buffer.
+
+    Normal computation is done in the SAME coordinate system you output:
+      - x,y normalized to [-1, 1]
+      - z normalized to [0, 1] (using z_max in mm)
+
+    The order of operations matches your preference:
+      1) fill/inpaint depth
+      2) compute normals
+      3) collect main points
+      4) optional downsample main points
+      5) append border points at the end (for debugging visualization)
+      6) (points are already normalized if normalize=True)
+
+    Args:
+      zbuf: (H,W) depth in sensor frame (mm), +inf for invalid
+      pixmm: mm per pixel
+      normalize: if True, output x,y in [-1,1], z in [0,1]
+      z_max: maximum indentation depth in mm for normalization
+      contact_only: if True, keep only z < 0 for the main points
+      n_points: if set, randomly downsample main points to this many (before border append)
+      include_border: if True, append border "frame" points at the end
+      border_thickness: border thickness in pixels
+      border_z_fill: z (mm) used to fill invalid z before inpainting AND for border point z values
+                     (for debug border, many people prefer 0.0)
+      inpaint_for_normals: if True, inpaint invalid z before computing normals
+      inpaint_radius_px: inpainting radius
+
+    Returns:
+      pts:     (N,3) float32
+      normals: (N,3) float32 unit normals in the SAME coordinate system as pts
+               (sensor frame if normalize=False, normalized space if normalize=True)
+    """
+    H, W = zbuf.shape
+    zbuf_f = zbuf.astype(np.float32, copy=False)
+
+    # ----------------------------
+    # 1) Fill/inpaint depth for stable gradients
+    # ----------------------------
+    z_fill = zbuf_f.copy()
+    invalid = ~np.isfinite(z_fill)
+    if np.any(invalid):
+        z_fill[invalid] = float(border_z_fill)
+
+    if inpaint_for_normals and np.any(invalid):
+        inv_mask = invalid.astype(np.uint8) * 255
+        z_fill = cv2.inpaint(z_fill, inv_mask, int(inpaint_radius_px), cv2.INPAINT_TELEA).astype(np.float32)
+
+    # Convert depth (z) to indentation height in mm for consistent [0..] handling:
+    # Your convention: penetrating points have z<0, height_mm = -z
+    height_fill_mm = np.maximum(-z_fill, 0.0).astype(np.float32)
+
+    # ----------------------------
+    # 2) Define coordinate mapping + compute normals in output space
+    # ----------------------------
+    # Pixel -> sensor mm: x_mm=(u-W/2)*pixmm, y_mm=(v-H/2)*pixmm
+    # If normalize: x_n=2*u/W - 1, y_n=2*v/H - 1, z_n=height_mm/z_max
+    #
+    # Normals for surface z=z(x,y) use: n ~ (-dz/dx, -dz/dy, 1)
+    # We compute gradients w.r.t. the SAME axes as output.
+    if normalize:
+        # spacing in normalized coords per pixel
+        dx = 2.0 / float(W)   # change in x_n per +1 pixel in u
+        dy = 2.0 / float(H)   # change in y_n per +1 pixel in v
+
+        # z in normalized [0,1]
+        z_for_grad = (height_fill_mm / float(z_max)).astype(np.float32)
+
+        dz_dy, dz_dx = np.gradient(z_for_grad, dy, dx)  # axis0=y, axis1=x
+
+        nx = -dz_dx
+        ny = -dz_dy
+        nz = np.ones_like(z_for_grad, dtype=np.float32)
+
+        nrm = np.sqrt(nx * nx + ny * ny + nz * nz) + 1e-12
+        nx /= nrm
+        ny /= nrm
+        nz /= nrm
+
+    else:
+        # gradients in mm space
+        dz_dy, dz_dx = np.gradient(height_fill_mm, float(pixmm), float(pixmm))
+
+        nx = -dz_dx
+        ny = -dz_dy
+        nz = np.ones_like(height_fill_mm, dtype=np.float32)
+
+        nrm = np.sqrt(nx * nx + ny * ny + nz * nz) + 1e-12
+        nx /= nrm
+        ny /= nrm
+        nz /= nrm
+
+    # ----------------------------
+    # 3) Main point mask + point extraction
+    # ----------------------------
+    valid = np.isfinite(zbuf_f)
+    if contact_only:
+        valid &= (zbuf_f < 0.0)
+
+    vv, uu = np.nonzero(valid)
+
+    if vv.size > 0:
+        if normalize:
+            # x,y in [-1,1], z in [0,1]
+            x = (2.0 * uu.astype(np.float32) / float(W)) - 1.0
+            y = (2.0 * vv.astype(np.float32) / float(H)) - 1.0
+            z = (np.maximum(-zbuf_f[vv, uu], 0.0) / float(z_max)).astype(np.float32)
+        else:
+            x = (uu.astype(np.float32) - (W * 0.5)) * float(pixmm)
+            y = (vv.astype(np.float32) - (H * 0.5)) * float(pixmm)
+            z = zbuf_f[vv, uu].astype(np.float32)  # keep original z in mm (negative in contact)
+
+        pts_main = np.stack([x, y, z], axis=1).astype(np.float32)
+        n_main = np.stack([nx[vv, uu], ny[vv, uu], nz[vv, uu]], axis=1).astype(np.float32)
+    else:
+        pts_main = np.zeros((0, 3), dtype=np.float32)
+        n_main = np.zeros((0, 3), dtype=np.float32)
+
+    # ----------------------------
+    # 4) Optional downsample main points (before border append)
+    # ----------------------------
+    if n_points is not None and pts_main.shape[0] > int(n_points):
+        if rng is None:
+            rng = np.random.default_rng()
+        idx = rng.choice(pts_main.shape[0], size=int(n_points), replace=False)
+        pts_main = pts_main[idx]
+        n_main = n_main[idx]
+
+    # ----------------------------
+    # 5) Append border points at the end (for debug visualization)
+    # ----------------------------
+    if include_border:
+        t = max(1, int(border_thickness))
+        t = min(t, H // 2, W // 2)
+
+        border = np.zeros((H, W), dtype=bool)
+        border[:t, :] = True
+        border[-t:, :] = True
+        border[:, :t] = True
+        border[:, -t:] = True
+
+        bv, bu = np.nonzero(border)
+
+        if normalize:
+            xb = (2.0 * bu.astype(np.float32) / float(W)) - 1.0
+            yb = (2.0 * bv.astype(np.float32) / float(H)) - 1.0
+            zb = np.zeros_like(xb, dtype=np.float32)  # debug border at z=0 in normalized space
+        else:
+            xb = (bu.astype(np.float32) - (W * 0.5)) * float(pixmm)
+            yb = (bv.astype(np.float32) - (H * 0.5)) * float(pixmm)
+            zb = np.full_like(xb, float(border_z_fill), dtype=np.float32)
+
+        pts_border = np.stack([xb, yb, zb], axis=1).astype(np.float32)
+        n_border = np.stack([nx[bv, bu], ny[bv, bu], nz[bv, bu]], axis=1).astype(np.float32)
+
+        if pts_main.size:
+            pts = np.vstack([pts_main, pts_border]).astype(np.float32)
+            normals = np.vstack([n_main, n_border]).astype(np.float32)
+        else:
+            pts = pts_border
+            normals = n_border
+    else:
+        pts = pts_main
+        normals = n_main
+    ret = np.hstack([pts, normals]).astype(np.float16)
+    return ret
+
