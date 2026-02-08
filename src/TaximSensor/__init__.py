@@ -81,6 +81,7 @@ class TaximSensor(object):
         # polytable
         calib_data = f"{sensor_type}/polycalib.npz"
         self.calib_data = CalibData(calib_data)
+        self.resize=resize
 
         # raw calibration data, here only used for background
         if bg_file is None:
@@ -89,16 +90,19 @@ class TaximSensor(object):
             data_file = np.load(bg_file, allow_pickle=True)
         self.data_file = data_file['f0']
         self.bgs = []
+        self.bgs_rot = []
         for i in range(self.data_file.shape[0]):
             self.f0 = self.data_file[i]
             self.bgs.append(self.processInitialFrame())
+            self.bgs_rot.append(cv2.rotate(np.clip(np.rint(self.bgs[-1].copy()), 0, 255).astype(np.uint8), cv2.ROTATE_90_COUNTERCLOCKWISE))
+            if self.resize is not None:
+                self.bgs_rot[-1] = cv2.resize(self.bgs_rot[-1], self.resize)
         
         self.f0 = self.data_file[bg_index]
         self.bg_len = len(self.bgs)
         self.bg_index = bg_index
         self.bg_proc = self.bgs[bg_index]
-        self.bg_proc_rot = cv2.rotate(np.clip(np.rint(self.bg_proc.copy()), 0, 255).astype(np.uint8), cv2.ROTATE_90_COUNTERCLOCKWISE)
-        self.resize=resize
+        self.bg_proc_rot = self.bgs_rot[bg_index]
 
         #shadow calibration
         self.shadow_depth = [0.4,0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2]
@@ -115,7 +119,7 @@ class TaximSensor(object):
             return
         self.f0 = self.data_file[bg_index]
         self.bg_proc = self.bgs[bg_index]
-        self.bg_proc_rot = cv2.rotate(np.clip(np.rint(self.bg_proc.copy()), 0, 255).astype(np.uint8), cv2.ROTATE_90_COUNTERCLOCKWISE)
+        self.bg_proc_rot = self.bgs_rot[bg_index]
         self.bg_index = bg_index
 
     def add_object_mujoco(self, obj_name, model, data, mesh_name=None, obj_type=mj.mjtObj.mjOBJ_BODY):
