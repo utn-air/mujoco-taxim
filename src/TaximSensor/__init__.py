@@ -59,7 +59,7 @@ class Link:
 
 
 class TaximSensor(object):
-    def __init__(self, sensor_type="digit", bg_file=None, bg_index=0):
+    def __init__(self, sensor_type="digit", bg_file=None, bg_index=0, resize=None):
         '''
         Initialize the simulator.
         1) load the calibration files,
@@ -98,6 +98,7 @@ class TaximSensor(object):
         self.bg_index = bg_index
         self.bg_proc = self.bgs[bg_index]
         self.bg_proc_rot = cv2.rotate(np.clip(np.rint(self.bg_proc.copy()), 0, 255).astype(np.uint8), cv2.ROTATE_90_COUNTERCLOCKWISE)
+        self.resize=resize
 
         #shadow calibration
         self.shadow_depth = [0.4,0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2]
@@ -145,7 +146,7 @@ class TaximSensor(object):
             body_id = model.geom_bodyid[obj_id]
         else:
             raise ValueError(f"Unsupported object type: {obj_type}")
-
+        assert obj_id >= 0, f"Object {obj_name} not found in model."
         # Keep track of body id for contact checking
         self.object_body_ids.add(body_id)
         self.object_links[obj_name] = Link(
@@ -293,23 +294,24 @@ class TaximSensor(object):
         noise = np.random.normal(0, noise_sigma, sim_img.shape).astype(sim_img.dtype)
         sim_img = cv2.add(sim_img, noise)
         sim_img  = cv2.rotate(np.clip(np.rint(sim_img), 0, 255).astype(np.uint8), cv2.ROTATE_90_COUNTERCLOCKWISE)
+        sim_img = cv2.resize(sim_img, self.resize) if self.resize is not None else sim_img
+
+        hm_return = gt_height_map if get_depth else np.zeros((psp.w, psp.h))
+        hm_return = cv2.rotate(hm_return, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        hm_return = cv2.resize(hm_return, self.resize) if self.resize is not None else hm_return
         
         if(visualize):
             if not get_depth:
                 combined_img = sim_img
             else:
-                gt_height_map  = cv2.rotate(gt_height_map, cv2.ROTATE_90_COUNTERCLOCKWISE)
                 # repeat height map to 3 channels
-                gt_vis = np.repeat(gt_height_map[:, :, np.newaxis], 3, axis=2)
+                gt_vis = np.repeat(hm_return[:, :, np.newaxis], 3, axis=2)
                 div = 1 if np.max(gt_vis) == 0 else np.max(gt_vis)
                 gt_vis = (gt_vis / div * 255).astype(np.uint8)
                 combined_img = np.concatenate((sim_img, gt_vis), axis=1)
             cv2.imshow("taxim", combined_img)
             cv2.waitKey(1)
-        if get_depth:
-            return sim_img, gt_height_map, pcn
-        else:
-            return sim_img, np.zeros((psp.w, psp.h)), pcn
+        return sim_img, hm_return, pcn
         
     def render_taxim(self, model, data, shadow=True, get_depth=True, visualize=True):
         '''
@@ -326,7 +328,7 @@ class TaximSensor(object):
         touch_data = self.get_force_mujoco(model, data)
         if touch_data is None:
             sim_img = self.bg_proc.astype(np.float64)
-            gt_height_map = np.zeros((psp.h, psp.w))
+            hm_return = np.zeros((psp.h, psp.w))
             pcn = np.array([])
         else:
             obj_name = [*touch_data][0]
@@ -350,23 +352,24 @@ class TaximSensor(object):
         noise = np.random.normal(0, noise_sigma, sim_img.shape).astype(sim_img.dtype)
         sim_img = cv2.add(sim_img, noise)
         sim_img  = cv2.rotate(np.clip(np.rint(sim_img), 0, 255).astype(np.uint8), cv2.ROTATE_90_COUNTERCLOCKWISE)
+        sim_img = cv2.resize(sim_img, self.resize) if self.resize is not None else sim_img
+
+        hm_return = gt_height_map if get_depth else np.zeros((psp.w, psp.h))
+        hm_return = cv2.rotate(hm_return, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        hm_return = cv2.resize(hm_return, self.resize) if self.resize is not None else hm_return
         
         if(visualize):
             if not get_depth:
                 combined_img = sim_img
             else:
-                gt_height_map  = cv2.rotate(gt_height_map, cv2.ROTATE_90_COUNTERCLOCKWISE)
                 # repeat height map to 3 channels
-                gt_vis = np.repeat(gt_height_map[:, :, np.newaxis], 3, axis=2)
+                gt_vis = np.repeat(hm_return[:, :, np.newaxis], 3, axis=2)
                 div = 1 if np.max(gt_vis) == 0 else np.max(gt_vis)
                 gt_vis = (gt_vis / div * 255).astype(np.uint8)
                 combined_img = np.concatenate((sim_img, gt_vis), axis=1)
             cv2.imshow("taxim", combined_img)
             cv2.waitKey(1)
-        if get_depth:
-            return sim_img, gt_height_map, pcn
-        else:
-            return sim_img, np.zeros((psp.w, psp.h)), pcn
+        return sim_img, hm_return, pcn
         
     def processInitialFrame(self):
         """
