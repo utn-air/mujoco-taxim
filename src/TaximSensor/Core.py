@@ -286,6 +286,27 @@ def pointcloud_from_zbuf_with_normals(
     border_z_fill=0.0,
     inpaint_for_normals=True,
     inpaint_radius_px=3,
+    # ----------------------------
+    # Reconstructed-mesh roughness tuning knobs
+    # ----------------------------
+    roughness_enable=True,
+    roughness_alpha=0.1,
+    # spatial scales (in pixels) for multi-scale correlated noise
+    roughness_sigmas_px=(4.0, 6.0, 8.0, 12.0, 16.0),
+    # weights per sigma; if None, uses 1/(2^k) style and normalizes to unit std
+    roughness_weights=None,
+    # how noise amplitude scales with depth
+    # "constant" | "linear" | "quadratic" | "clamped_linear"
+    roughness_depth_scale="clamped_linear",
+    # clamp range for "clamped_linear" (multipliers relative to median depth)
+    roughness_depth_clamp=(0.5, 2.0),
+    # reduce noise near steep gradients to avoid tearing at discontinuities
+    roughness_edge_attenuate=True,
+    roughness_edge_gamma=1.0,       # higher -> stronger attenuation with slope
+    roughness_edge_eps=1e-3,        # stability term in attenuation
+    # add sparse outliers (optional)
+    roughness_outlier_p=0.0,        # e.g. 0.002
+    roughness_outlier_scale=4.0,    # multiplier on base amplitude for outliers
 ):
     """
     Build a point cloud + per-point normals from a z-buffer.
@@ -312,14 +333,13 @@ def pointcloud_from_zbuf_with_normals(
       include_border: if True, append border "frame" points at the end
       border_thickness: border thickness in pixels
       border_z_fill: z (mm) used to fill invalid z before inpainting AND for border point z values
-                     (for debug border, many people prefer 0.0)
       inpaint_for_normals: if True, inpaint invalid z before computing normals
       inpaint_radius_px: inpainting radius
 
+      roughness_*: controls correlated “reconstructed mesh” bumpiness injected into depth.
+
     Returns:
-      pts:     (N,3) float32
-      normals: (N,3) float32 unit normals in the SAME coordinate system as pts
-               (sensor frame if normalize=False, normalized space if normalize=True)
+      ret: (N,6) float16 where columns are [x,y,z,nx,ny,nz]
     """
     H, W = zbuf.shape
     zbuf_f = zbuf.astype(np.float32, copy=False)
@@ -341,19 +361,105 @@ def pointcloud_from_zbuf_with_normals(
     height_fill_mm = np.maximum(-z_fill, 0.0).astype(np.float32)
 
     # ----------------------------
+    # 1.5) OPTIONAL: Inject reconstructed-mesh roughness noise into height_fill_mm
+    #      (only on valid/contact pixels, and without bleeding across holes)
+    # ----------------------------
+    if roughness_enable:
+        if rng is None:
+            rng = np.random.default_rng()
+
+        # mask where we want to perturb the surface (non-zero / contact-like region)
+        # If contact_only=True, match your main point selection; otherwise use any finite depth.
+        M = np.isfinite(zbuf_f)
+        if contact_only:
+            M &= (zbuf_f < 0.0)
+
+        if np.any(M):
+            # --- multi-scale correlated noise in image space ---
+            base = np.zeros((H, W), dtype=np.float32)
+
+            sigmas = tuple(float(s) for s in roughness_sigmas_px)
+            if roughness_weights is None:
+                # 1/(2^k) falloff
+                ws = np.array([1.0 / (2.0 ** i) for i in range(len(sigmas))], dtype=np.float32)
+            else:
+                ws = np.asarray(roughness_weights, dtype=np.float32)
+                if ws.size != len(sigmas):
+                    raise ValueError("roughness_weights must match length of roughness_sigmas_px")
+
+            # build and sum bands
+            for w_i, s_i in zip(ws, sigmas):
+                n = rng.standard_normal((H, W), dtype=np.float32)
+                # Gaussian blur (border reflect avoids edge darkening)
+                n = cv2.GaussianBlur(n, ksize=(0, 0), sigmaX=s_i, sigmaY=s_i, borderType=cv2.BORDER_REFLECT101)
+                base += w_i * n
+
+            # normalize to unit std on masked region (so roughness_alpha is meaningful)
+            std = float(np.std(base[M])) if np.any(M) else 1.0
+            if std > 1e-8:
+                base = base / std
+
+            # --- depth-dependent amplitude ---
+            # Use local "height" (indentation) as the depth proxy here.
+            h = height_fill_mm
+            h_med = float(np.median(h[M])) if np.any(M) else 0.0
+
+            if roughness_depth_scale == "constant" or h_med <= 1e-8:
+                depth_mult = 1.0
+            elif roughness_depth_scale == "linear":
+                depth_mult = (h / (h_med + 1e-8))
+            elif roughness_depth_scale == "quadratic":
+                depth_mult = (h / (h_med + 1e-8)) ** 2
+            elif roughness_depth_scale == "clamped_linear":
+                dm = (h / (h_med + 1e-8))
+                lo, hi = float(roughness_depth_clamp[0]), float(roughness_depth_clamp[1])
+                depth_mult = np.clip(dm, lo, hi)
+            else:
+                raise ValueError(
+                    "roughness_depth_scale must be one of: "
+                    "'constant'|'linear'|'quadratic'|'clamped_linear'"
+                )
+
+            # --- edge attenuation (avoid tearing at discontinuities / steep slopes) ---
+            if roughness_edge_attenuate:
+                # slope magnitude in mm/pixel (simple, robust)
+                gy, gx = np.gradient(h, 1.0, 1.0)
+                slope = np.sqrt(gx * gx + gy * gy).astype(np.float32)
+                # attenuation in (0,1]; higher slope -> smaller multiplier
+                edge_mult = 1.0 / (1.0 + (slope / float(roughness_edge_eps)) ** float(roughness_edge_gamma))
+            else:
+                edge_mult = 1.0
+
+            # --- sparse outliers (optional) ---
+            if roughness_outlier_p and roughness_outlier_p > 0.0:
+                out = (rng.random((H, W), dtype=np.float32) < float(roughness_outlier_p)).astype(np.float32)
+                out *= rng.standard_normal((H, W), dtype=np.float32)
+                base = base + float(roughness_outlier_scale) * out
+
+            # --- apply only on mask ---
+            # roughness_alpha is in *mm* if normalize=False, or still in mm here because
+            # we're perturbing height_fill_mm before normalization.
+            delta_mm = float(roughness_alpha) * base
+            if not isinstance(depth_mult, (float, int)):
+                delta_mm = delta_mm * depth_mult.astype(np.float32)
+            delta_mm = delta_mm * (edge_mult if isinstance(edge_mult, (float, int)) else edge_mult.astype(np.float32))
+
+            height_fill_mm = height_fill_mm.copy()
+            height_fill_mm[M] = np.maximum(height_fill_mm[M] + delta_mm[M], 0.0)
+    # debug_height_fill_mm = height_fill_mm.copy()
+    # debug_height_fill_mm = np.repeat(debug_height_fill_mm[:, :, np.newaxis], 3, axis=2)  # (H,W,3)
+    
+    # div = float(z_max) if z_max > 1e-8 else 1.0
+    # cv2.imwrite("debug_height_fill.png", (debug_height_fill_mm / div * 255.0).clip(0, 255).astype(np.uint8))
+    # breakpoint()
+
+    # ----------------------------
     # 2) Define coordinate mapping + compute normals in output space
     # ----------------------------
-    # Pixel -> sensor mm: x_mm=(u-W/2)*pixmm, y_mm=(v-H/2)*pixmm
-    # If normalize: x_n=2*u/W - 1, y_n=2*v/H - 1, z_n=height_mm/z_max
-    #
-    # Normals for surface z=z(x,y) use: n ~ (-dz/dx, -dz/dy, 1)
-    # We compute gradients w.r.t. the SAME axes as output.
     if normalize:
-        # spacing in normalized coords per pixel
-        dx = 2.0 / float(W)   # change in x_n per +1 pixel in u
-        dy = 2.0 / float(H)   # change in y_n per +1 pixel in v
+        dx = 2.0 / float(W)
+        dy = 2.0 / float(H)
 
-        # z in normalized [0,1]
         z_for_grad = (height_fill_mm / float(z_max)).astype(np.float32)
 
         dz_dy, dz_dx = np.gradient(z_for_grad, dy, dx)  # axis0=y, axis1=x
@@ -368,7 +474,6 @@ def pointcloud_from_zbuf_with_normals(
         nz /= nrm
 
     else:
-        # gradients in mm space
         dz_dy, dz_dx = np.gradient(height_fill_mm, float(pixmm), float(pixmm))
 
         nx = -dz_dx
@@ -391,14 +496,15 @@ def pointcloud_from_zbuf_with_normals(
 
     if vv.size > 0:
         if normalize:
-            # x,y in [-1,1], z in [0,1]
             x = (2.0 * uu.astype(np.float32) / float(W)) - 1.0
             y = (2.0 * vv.astype(np.float32) / float(H)) - 1.0
-            z = (np.maximum(-zbuf_f[vv, uu], 0.0) / float(z_max)).astype(np.float32)
+            # IMPORTANT: use the *same* (possibly roughened) height field for z output
+            z = (height_fill_mm[vv, uu] / float(z_max)).astype(np.float32)
         else:
             x = (uu.astype(np.float32) - (W * 0.5)) * float(pixmm)
             y = (vv.astype(np.float32) - (H * 0.5)) * float(pixmm)
-            z = zbuf_f[vv, uu].astype(np.float32)  # keep original z in mm (negative in contact)
+            # Keep original signed z convention, but use roughened height for contact points:
+            z = (-height_fill_mm[vv, uu]).astype(np.float32)
 
         pts_main = np.stack([x, y, z], axis=1).astype(np.float32)
         n_main = np.stack([nx[vv, uu], ny[vv, uu], nz[vv, uu]], axis=1).astype(np.float32)
@@ -434,7 +540,7 @@ def pointcloud_from_zbuf_with_normals(
         if normalize:
             xb = (2.0 * bu.astype(np.float32) / float(W)) - 1.0
             yb = (2.0 * bv.astype(np.float32) / float(H)) - 1.0
-            zb = np.zeros_like(xb, dtype=np.float32)  # debug border at z=0 in normalized space
+            zb = np.zeros_like(xb, dtype=np.float32)
         else:
             xb = (bu.astype(np.float32) - (W * 0.5)) * float(pixmm)
             yb = (bv.astype(np.float32) - (H * 0.5)) * float(pixmm)
@@ -452,6 +558,7 @@ def pointcloud_from_zbuf_with_normals(
     else:
         pts = pts_main
         normals = n_main
+
     ret = np.hstack([pts, normals]).astype(np.float16)
     return ret
 

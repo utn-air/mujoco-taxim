@@ -267,7 +267,7 @@ class TaximSensor(object):
         # TODO: Make the dict key distinct for different sensors
         return touch_data
 
-    def render_taxim_named(self, name, shadow=True, get_depth=True, visualize=True):
+    def render_taxim_named(self, name, shadow=True, get_depth=True, pcn_add_noise=False, visualize=True):
         '''
         Renders the taxim image for the given object name.
         This function assumes that a contact check has already been made, and thus the object is close enough to the sensor.
@@ -288,7 +288,7 @@ class TaximSensor(object):
         wTo[:3, :3] = wRo
         wTo[:3, 3] = wPo * 1000.0 # change to mm
 
-        height_map, gel_map, contact_mask, press_depth, gt_height_map, pcn = self.generateHeightMapWithTransform(wTs, wTo, obj_name)
+        height_map, gel_map, contact_mask, press_depth, gt_height_map, pcn = self.generateHeightMapWithTransform(wTs, wTo, obj_name, pcn_add_noise=pcn_add_noise)
         heightMap, contact_mask, contact_height = Core.deformApprox(press_depth, height_map, gel_map, contact_mask)
         sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
         sim_img = sim_img if not shadow else shadow_sim_img
@@ -317,7 +317,7 @@ class TaximSensor(object):
             cv2.waitKey(1)
         return sim_img, hm_return, pcn
         
-    def render_taxim(self, model, data, shadow=True, get_depth=True, visualize=True):
+    def render_taxim(self, model, data, shadow=True, get_depth=True, pcn_add_noise=False, visualize=True):
         '''
         Renders the taxim image based on the current mujoco state.
         1. Check for contact with self.get_force_mujoco
@@ -346,7 +346,7 @@ class TaximSensor(object):
             wTo[:3, 3] = wPo * 1000.0 # change to mm
 
             # f1: 0.025, deform: 0.025, sim: 0.15
-            height_map, gel_map, contact_mask, press_depth, gt_height_map, pcn = self.generateHeightMapWithTransform(wTs, wTo, obj_name)
+            height_map, gel_map, contact_mask, press_depth, gt_height_map, pcn = self.generateHeightMapWithTransform(wTs, wTo, obj_name, pcn_add_noise=pcn_add_noise)
             heightMap, contact_mask, contact_height = Core.deformApprox(press_depth, height_map, gel_map, contact_mask)
             sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
             sim_img = sim_img if not shadow else shadow_sim_img
@@ -598,7 +598,7 @@ class TaximSensor(object):
         shadow_sim_img = cv2.GaussianBlur(shadow_sim_img.astype(np.float32), (pr.kernel_size, pr.kernel_size), 0)
         return sim_img, shadow_sim_img
 
-    def generateHeightMapWithTransform(self, wTs, wTo, obj_name, pressing_mm_max = 3.0):
+    def generateHeightMapWithTransform(self, wTs, wTo, obj_name, pressing_mm_max = 3.0, pcn_add_noise=False):
         """
         Generate the height map by interacting the object with the gelpad model.
 
@@ -631,7 +631,7 @@ class TaximSensor(object):
         )
         heightMap = Core.heightmap_from_zbuf(zbuf, psp.pixmm)
         n_points = 5000
-        pcn = Core.pointcloud_from_zbuf_with_normals(zbuf, psp.pixmm, n_points=n_points)
+        pcn = Core.pointcloud_from_zbuf_with_normals(zbuf, psp.pixmm, n_points=n_points, roughness_enable=pcn_add_noise)
         # assert pcn.shape[0] == n_points, "Pointcloud does not have the expected number of points."
 
         # pressing depth in pixel
