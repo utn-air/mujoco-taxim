@@ -59,7 +59,7 @@ class Link:
 
 
 class TaximSensor(object):
-    def __init__(self, sensor_type="digit", bg_file=None, bg_index=0, resize=None):
+    def __init__(self, sensor_type="digit", bg_file=None, bg_index=0, resize=None, preprocess_bg=True):
         '''
         Initialize the simulator.
         1) load the calibration files,
@@ -70,8 +70,8 @@ class TaximSensor(object):
         :param data_folder: root path to calibration data
         :param gelpad_model_path: path to the gelpad model numpy file
         ''' 
-        if sensor_type != "digit":
-            raise NotImplementedError("Currently only digit sensor is supported.")
+        if sensor_type != "digit" and sensor_type != "gelsight_r1.5":
+            raise NotImplementedError("Currently only digit and gelsight_r1.5 sensors are supported.")
 
         self.sensor_type = sensor_type
         self.obj_mesh = {}
@@ -93,7 +93,10 @@ class TaximSensor(object):
         self.bgs_rot = []
         for i in range(self.data_file.shape[0]):
             self.f0 = self.data_file[i]
-            self.bgs.append(self.processInitialFrame())
+            if preprocess_bg:
+                self.bgs.append(self.processInitialFrame())
+            else:
+                self.bgs.append(self.f0.copy()) # So this keeps the bg looking exactly the same... procInitFrame just applies some gaussian filtering to make the bg smoother
             self.bgs_rot.append(cv2.rotate(np.clip(np.rint(self.bgs[-1].copy()), 0, 255).astype(np.uint8), cv2.ROTATE_90_COUNTERCLOCKWISE))
             if self.resize is not None:
                 self.bgs_rot[-1] = cv2.resize(self.bgs_rot[-1], self.resize)
