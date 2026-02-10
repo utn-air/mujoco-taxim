@@ -270,7 +270,7 @@ class TaximSensor(object):
         # TODO: Make the dict key distinct for different sensors
         return touch_data
 
-    def render_taxim_named(self, name, shadow=True, get_depth=True, pcn_add_noise=False, visualize=True):
+    def render_taxim_named(self, name, shadow=True, get_depth=True, pcn_add_noise=False, visualize=True, cycle_bg=False):
         '''
         Renders the taxim image for the given object name.
         This function assumes that a contact check has already been made, and thus the object is close enough to the sensor.
@@ -318,9 +318,11 @@ class TaximSensor(object):
                 combined_img = np.concatenate((sim_img, gt_vis), axis=1)
             cv2.imshow("taxim", combined_img)
             cv2.waitKey(1)
+        if cycle_bg:
+            self.change_bg((self.bg_index + 1) % self.bg_len)
         return sim_img, hm_return, pcn
         
-    def render_taxim(self, model, data, shadow=True, get_depth=True, pcn_add_noise=False, visualize=True):
+    def render_taxim(self, model, data, shadow=True, get_depth=True, pcn_add_noise=False, visualize=True, cycle_bg=False):
         '''
         Renders the taxim image based on the current mujoco state.
         1. Check for contact with self.get_force_mujoco
@@ -376,6 +378,8 @@ class TaximSensor(object):
                 combined_img = np.concatenate((sim_img, gt_vis), axis=1)
             cv2.imshow("taxim", combined_img)
             cv2.waitKey(1)
+        if cycle_bg:
+            self.change_bg((self.bg_index + 1) % self.bg_len)
         return sim_img, hm_return, pcn
         
     def processInitialFrame(self):
