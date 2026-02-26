@@ -11,7 +11,7 @@ from TaximSensor.Basics.CalibData import CalibData, read_calib_np
 import TaximSensor.Basics.params as pr
 import TaximSensor.Basics.sensorParams as psp
 import TaximSensor.Core as Core
-from TaximSensor.helpers import smooth_mesh, invert_homogeneous_matrix, smooth_heightmap_mm, build_trimesh_from_mujoco_mesh, build_trimesh_from_mujoco_primitive
+from TaximSensor.helpers import smooth_mesh, invert_homogeneous_matrix, smooth_heightmap_mm, build_trimesh_from_mujoco_mesh, build_trimesh_from_mujoco_primitive, bgr_to_rgb, rgb_to_bgr
 __version__ = "0.1"  # Source of truth for mujoco-taxim's version
 
 _exported_dunders = {
@@ -91,6 +91,8 @@ class TaximSensor(object):
         self.data_file = data_file['f0']
         self.bgs = []
         self.bgs_rot = []
+        for i, df in enumerate(self.data_file):
+            self.data_file[i] = rgb_to_bgr(df).copy() # Do a channel flip at init to avoid confusion down the line
         for i in range(self.data_file.shape[0]):
             self.f0 = self.data_file[i]
             if preprocess_bg:
@@ -116,6 +118,12 @@ class TaximSensor(object):
         self.gel_map = read_calib_np("gelmap5.npy")
         self.gel_map = cv2.GaussianBlur(self.gel_map.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
 
+    def get_current_bg(self):
+        '''
+        Returns the current background, rotated to Portrait, in RGB.
+        '''
+        return bgr_to_rgb(self.bg_proc_rot)
+    
     def change_bg(self, bg_index):
         if bg_index > len(self.bgs)-1:
             print("Warning: bg_index exceeds the number of available backgrounds. No change made.")
@@ -270,15 +278,12 @@ class TaximSensor(object):
         # TODO: Make the dict key distinct for different sensors
         return touch_data
 
-    def render_taxim_named(self, name, shadow=True, get_depth=True, pcn_add_noise=False, visualize=True, cycle_bg=False):
+    def render_taxim_named(self, name, shadow=True, get_depth=True, img_noise_sigma=5, pcn_add_noise=False, visualize=True, cycle_bg=True):
         '''
-        Renders the taxim image for the given object name.
+        Renders the taxim image for the given object name, and returns the simulated image, ground truth height map, and point cloud.
         This function assumes that a contact check has already been made, and thus the object is close enough to the sensor.
-        
-        :param name: The name of the object to render the taxim image for. Must be a key added using self.add_object_mujoco.
-        :param shadow: Whether to render shadows in the image.
-        :param get_depth: Whether to return the depth map along with the image.
-        :param visualize: Whether to display the image using OpenCV.
+
+        Returns the rendered taxim image in RGB format.
         '''
         
         obj_name = name
@@ -297,7 +302,7 @@ class TaximSensor(object):
         sim_img = sim_img if not shadow else shadow_sim_img
         
         # add some gaussian noise to simulate real sensor noise
-        noise_sigma = 5
+        noise_sigma = img_noise_sigma
         noise = np.random.normal(0, noise_sigma, sim_img.shape).astype(sim_img.dtype)
         sim_img = cv2.add(sim_img, noise)
         sim_img  = cv2.rotate(np.clip(np.rint(sim_img), 0, 255).astype(np.uint8), cv2.ROTATE_90_COUNTERCLOCKWISE)
@@ -320,19 +325,15 @@ class TaximSensor(object):
             cv2.waitKey(1)
         if cycle_bg:
             self.change_bg((self.bg_index + 1) % self.bg_len)
-        return sim_img, hm_return, pcn
+        sim_img_rgb = bgr_to_rgb(sim_img)
+        return sim_img_rgb, hm_return, pcn
         
-    def render_taxim(self, model, data, shadow=True, get_depth=True, pcn_add_noise=False, visualize=True, cycle_bg=False):
+    def render_taxim(self, model, data, shadow=True, get_depth=True, img_noise_sigma=5, pcn_add_noise=False, visualize=True, cycle_bg=True):
         '''
-        Renders the taxim image based on the current mujoco state.
-        1. Check for contact with self.get_force_mujoco
-        2. Fetch the wTs and wTo
-        3. Pass it to the simulator to generate the tactile image
-        4. Return the image
-        
-        :param self: Description
-        :param model: Description
-        :param data: Description
+        Renders the taxim image based on the current mujoco state, and returns the simulated image, ground truth height map, and point cloud.
+
+        Returns the rendered taxim image in RGB format.
+
         '''
         touch_data = self.get_force_mujoco(model, data)
         if touch_data is None:
@@ -357,7 +358,7 @@ class TaximSensor(object):
             sim_img = sim_img if not shadow else shadow_sim_img
         
         # add some gaussian noise to simulate real sensor noise
-        noise_sigma = 5
+        noise_sigma = img_noise_sigma
         noise = np.random.normal(0, noise_sigma, sim_img.shape).astype(sim_img.dtype)
         sim_img = cv2.add(sim_img, noise)
         sim_img  = cv2.rotate(np.clip(np.rint(sim_img), 0, 255).astype(np.uint8), cv2.ROTATE_90_COUNTERCLOCKWISE)
@@ -380,7 +381,7 @@ class TaximSensor(object):
             cv2.waitKey(1)
         if cycle_bg:
             self.change_bg((self.bg_index + 1) % self.bg_len)
-        return sim_img, hm_return, pcn
+        return bgr_to_rgb(sim_img), hm_return, pcn
         
     def processInitialFrame(self):
         """
