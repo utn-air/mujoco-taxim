@@ -3,6 +3,14 @@ import trimesh
 import cv2
 
 
+def bgr_to_rgb(bgr: np.ndarray) -> np.ndarray:
+    rgb = bgr[..., ::-1]  # BGR -> RGB
+    return rgb
+
+def rgb_to_bgr(rgb: np.ndarray) -> np.ndarray:
+    bgr = rgb[..., ::-1]  # RGB -> BGR
+    return bgr
+
 def _unique_edges_with_face_adjacency(faces: np.ndarray):
     """
     Build unique undirected edges and (up to) 2 adjacent face indices per edge.
