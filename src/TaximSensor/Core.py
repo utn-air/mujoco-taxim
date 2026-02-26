@@ -518,10 +518,17 @@ def pointcloud_from_zbuf_with_normals(
     if n_points is not None and pts_main.shape[0] > int(n_points):
         if rng is None:
             rng = np.random.default_rng()
+        
         idx = rng.choice(pts_main.shape[0], size=int(n_points), replace=False)
         pts_main = pts_main[idx]
         n_main = n_main[idx]
-
+    elif n_points is not None and pts_main.shape[0] > 1000:
+        if rng is None:
+            rng = np.random.default_rng()
+        
+        idx = rng.choice(pts_main.shape[0], size=int(n_points), replace=True)
+        pts_main = pts_main[idx]
+        n_main = n_main[idx]
     # ----------------------------
     # 5) Append border points at the end (for debug visualization)
     # ----------------------------
