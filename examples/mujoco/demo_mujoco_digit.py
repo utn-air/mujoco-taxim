@@ -79,45 +79,23 @@ def main():
     mj.mj_step(model, data) # step to initialize object poses
     
 
-    # #--------------------#
-    # # TACTO Sensor Setup #
-    # #--------------------#
-    # #   Initialize tactos - this needs to be done before creating the glfw window,
-    # # probably due to the way glfw contexts are managed internally. 
-    # bg = cv2.imread(os.path.join(TACTO_DIR, "bg_digit_240_320.jpg"))
-    # tactos = tacto.Sensor(**cfg.tacto, background=bg)
+    #--------------------#
+    # Taxim Sensor Setup #
+    #--------------------#
 
+    # Sensor initialization is very simple. 
+    # You can choose between "digit" and "gelsight_r1.5" sensor types.
+    # You can specify a background image saved as npz where the image is stored under the key "bg", in shape [N, H, W, C].
+    # If it's not provided, the sensor will use a default background appropriate to the sensor type.
+    # bg_index specifies which background image to use in the provided/default npz file.
+    # Resize does what it says, in the format (new_h, new_w); output image will be scaled to this.
+    # preprocess_bg applies a gaussian blur to the background image.
+    sim = TaximSensor(sensor_type="digit", bg_file=None, bg_index=0, resize=None, preprocess_bg=True)
 
-    # #   Add the objects from MuJoCo to the Tacto sensor
-    # # Generally, you should use the add_geom_mujoco, unless you are 100% sure that the geom and the body is aligned.
-    # # More often than not, that is not the case.
-    # # Here, can_geom is the name of the geom defined in the touch_playground_rot.xml file.
-    # # can_mesh is optional, but if not provided, the sensor will try to look for a mesh with the name "can_geom"+"_mesh"
-    # tactos.add_geom_mujoco("can_geom", model, data, "can_mesh")
-
-    # #   The function for adding body is there too.
-    # # tactos.add_body_mujoco("can", model, data, "can_mesh")
-    
-    # #   Now we add the pyrender camera to the tacto sensor.
-    # # The name of its location is the site where the touch sensor is located in the xml file.
-    # # In this case, it is "left_tacto_pad".
-    # tactos.add_camera_mujoco(
-    #     "left_tacto_pad", model, data
-    # )
-
-    # #   You can add more than 1 camera so long as the appropriate sites and sensors are defined in the xml file.
-    # # tactos.add_camera_mujoco(
-    # #     "right_tacto_pad", model, data
-    # # )
-
-    
-    # Need to step mujoco once to let the mesh data generate properly
-
-    # Need to fetch the object mesh, parse it as a ply based on vertices, and then pass to simulator as str
-    # Which means we need to specify which geom data taxim should look for
-
-    sim = TaximSensor()
-    sim.add_geom_mujoco("can_geom", model, data, "can_mesh")
+    # For the sensor to work, the desired object in mujoco needs to be added.
+    sim.add_geom_mujoco("can_geom", model=model, data=data, mesh_name="can_mesh")
+    # Additionally, the site that acts as the surface of the sensor needs to be added.
+    # The site should align with the surface of the sensor, as Taxim determines which part to render using the site's xy-plane.
     sim.add_camera_mujoco("left_tacto_pad", model, data)
     
     #----------------------------#
@@ -140,36 +118,23 @@ def main():
     camera.type = mj.mjtCamera.mjCAMERA_TRACKING
     camera.trackbodyid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, "master")
 
-    #   You can choose to render the sensor in a separate thread.
-    # Otherwise, you can include the tactos.render(model, data) in the main MuJoCo loop.
-    # def render_digit():
-    #     while not glfw.window_should_close(window):
-    #         # This will render the color and depth images of all tacto sensors.
-    #         # You get an array of color and depth images, one for each sensor.
-    #         color, depth = tactos.render(model, data)
-    #         # The GUI automatically renders all color and depth images from multiple sensors side-by-side.
-    #         tactos.updateGUI(color, depth)
-    #         time.sleep(0.01)
-    # render_thread = threading.Thread(target=render_digit)
-    # render_thread.start()
-
     while not glfw.window_should_close(window):
         # step simulation of mujoco model
         data.qpos[model.joint("xx").qposadr] = qpos_holder['xx']
         data.qpos[model.joint("yy").qposadr] = qpos_holder['yy']
         data.qpos[model.joint("zz").qposadr] = qpos_holder['zz']
         mj.mj_step(model, data)
-        sim.change_bg((sim.bg_index + 1) % sim.bg_len)
-        sim.render_taxim(model, data)
+        # Optionally, you can cycle through the background images.
+        # sim.change_bg((sim.bg_index + 1) % sim.bg_len)
+        sim.render_taxim(model, 
+                         data, 
+                         shadow=True, # add shadow to rendered image?
+                         get_depth=True, # Return depth image?
+                         img_noise_sigma=5, # Gaussian noise to add to the rgb image 
+                         pcn_add_noise=False, # Add noise to the returned point cloud-normal?
+                         visualize=True, # visualize the render? 
+                         cycle_bg=True) # cycle through the background image after every render?
 
-        #   If you don't want to use the separate render thread, 
-        # You could render the tacto sensor in the main MuJoCo loop. 
-        # Just uncomment the following lines (after commenting out the render_thread).
-        # In practice, you would want to render the tacto sensor according to some frame rate condition.
-        # color, depth = tactos.render(model, data)
-        # tactos.updateGUI(color, depth)
-
-        # visualize the simulation
         # Render the scene
         viewport_width, viewport_height = glfw.get_framebuffer_size(window)
         mj.mjv_updateScene(
