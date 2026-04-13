@@ -1,3 +1,4 @@
+import mujoco
 import numpy as np
 import trimesh
 import cv2
@@ -313,3 +314,159 @@ def build_trimesh_from_mujoco_primitive(model, geom_id, geom_type):
         )
 
     return mesh
+
+
+# Contact checking utilities
+def _geom_ids_of_body(model, body_name):
+    """Return a Python set of geom ids belonging to a given body name."""
+    if type(body_name) is str:
+        bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+    else:
+        bid = body_name
+    # model.geom_bodyid is an array mapping geom -> body id
+    return {i for i in range(model.ngeom) if model.geom_bodyid[i] == bid}
+
+def _bodies_in_contact(model, data, body_a, body_b):
+    """
+    True if any contact exists between any geoms belonging to body_a and body_b.
+    Call after mj_step/mj_forward.
+    """
+    # cache sets on first call
+    if not hasattr(_bodies_in_contact, "_cache"):
+        _bodies_in_contact._cache = {}
+    key_a = ("geomset", body_a)
+    key_b = ("geomset", body_b)
+    if key_a not in _bodies_in_contact._cache:
+        _bodies_in_contact._cache[key_a] = _geom_ids_of_body(model, body_a)
+    if key_b not in _bodies_in_contact._cache:
+        _bodies_in_contact._cache[key_b] = _geom_ids_of_body(model, body_b)
+    set_a = _bodies_in_contact._cache[key_a]
+    set_b = _bodies_in_contact._cache[key_b]
+
+    for k in range(data.ncon):
+        con = data.contact[k]
+        g1, g2 = con.geom1, con.geom2
+        if (g1 in set_a and g2 in set_b) or (g1 in set_b and g2 in set_a):
+            return True
+    return False
+
+def _body_ids_in_contact(model, data, body_a, body_b):
+    """
+    True if any contact exists between any geoms belonging to body_a and body_b.
+    Call after mj_step/mj_forward.
+    """
+    # cache sets on first call
+    if not hasattr(_body_ids_in_contact, "_cache"):
+        _body_ids_in_contact._cache = {}
+    key_a = ("geomset", body_a)
+    key_b = ("geomset", body_b)
+    if key_a not in _body_ids_in_contact._cache:
+        _body_ids_in_contact._cache[key_a] = _geom_ids_of_body(model, body_a)
+    if key_b not in _body_ids_in_contact._cache:
+        _body_ids_in_contact._cache[key_b] = _geom_ids_of_body(model, body_b)
+    set_a = _body_ids_in_contact._cache[key_a]
+    set_b = _body_ids_in_contact._cache[key_b]
+
+    for k in range(data.ncon):
+        con = data.contact[k]
+        g1, g2 = con.geom1, con.geom2
+        if (g1 in set_a and g2 in set_b) or (g1 in set_b and g2 in set_a):
+            return True
+    return False
+
+def _check_for_geom_contact(model, data, geom_name="digit_pad"):
+    """True if any contact exists involving the named pad geom."""
+    if not hasattr(_check_for_geom_contact, "_cache"):
+        _check_for_geom_contact._cache = {}
+    if geom_name not in _check_for_geom_contact._cache:
+        try:
+            _check_for_geom_contact._cache[geom_name] = mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_GEOM, geom_name
+            )
+        except Exception:
+            raise RuntimeError(f'No geom named "{geom_name}" in the model.')
+
+    geom_id = _check_for_geom_contact._cache[geom_name]
+
+    for k in range(data.ncon):
+        con = data.contact[k]
+        if con.geom1 == geom_id or con.geom2 == geom_id:
+            return True
+    return False
+
+def _penetration_stats_between_body_and_geom(model, data, body, geom):
+    """
+    Compute penetration statistics between any geoms of `body` and the named `geom`.
+    Returns:
+        count          : number of active contact points between these bodies
+        max_penetration: largest (-dist) among contacts, clipped at 0 (meters)
+        min_dist       : smallest raw signed distance (can be >0 if margin is used)
+    Notes:
+        - Requires that you have called mj_forward or mj_step before (to populate contacts).
+        - If geom margins are >0, you may get contacts with dist > 0 (no real penetration).
+    """
+    # Get the list of geoms for the given body
+    geoms_a = _geom_ids_of_body(model, body)
+    try:
+        geom_b = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, geom)
+    except Exception:
+        raise RuntimeError(f'No geom named "{geom}" in the model.')
+    geoms_b = {geom_b}
+
+    count = 0
+    min_dist = np.inf
+    max_pen = 0.0
+
+    for k in range(data.ncon):
+        c = data.contact[k]
+        g1, g2 = c.geom1, c.geom2
+        if (g1 in geoms_a and g2 in geoms_b) or (g1 in geoms_b and g2 in geoms_a):
+            count += 1
+            d = float(c.dist)  # signed meters
+            min_dist = min(min_dist, d)
+            max_pen = max(max_pen, max(0.0, -d))  # penetration depth (meters)
+
+    if count == 0:
+        min_dist = np.inf
+        max_pen = 0.0
+    return count, max_pen, min_dist
+
+def _penetration_stats_between_geoms(model, data, geom_a, geom_b):
+    """
+    Compute penetration statistics between any geoms of body_a and body_b.
+    Returns:
+        count          : number of active contact points between these bodies
+        max_penetration: largest (-dist) among contacts, clipped at 0 (meters)
+        min_dist       : smallest raw signed distance (can be >0 if margin is used)
+    Notes:
+        - Requires that you have called mj_forward or mj_step before (to populate contacts).
+        - If geom margins are >0, you may get contacts with dist > 0 (no real penetration).
+    """
+    geom_a = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, geom_a)
+    geom_b = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, geom_b)
+
+    count = 0
+    min_dist = np.inf
+    max_pen = 0.0
+
+    for k in range(data.ncon):
+        c = data.contact[k]
+        g1, g2 = c.geom1, c.geom2
+        if (g1 == geom_a and g2 == geom_b) or (g1 == geom_b and g2 == geom_a):
+            count += 1
+            d = float(c.dist)  # signed meters
+            min_dist = min(min_dist, d)
+            max_pen = max(max_pen, max(0.0, -d))  # penetration depth (meters)
+
+    if count == 0:
+        min_dist = np.inf
+        max_pen = 0.0
+    return count, max_pen, min_dist
+
+def _body_and_geom_penetrating(model, data, body, geom, penetration_tol=0.0):
+    """
+    True if body and geom interpenetrate by more than penetration_tol (meters).
+    Set penetration_tol > 0 to 'relax' sensitivity.
+    """
+    _, max_pen, _ = _penetration_stats_between_body_and_geom(model, data, body, geom)
+    return max_pen > penetration_tol

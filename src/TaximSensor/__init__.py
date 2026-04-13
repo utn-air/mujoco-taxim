@@ -11,7 +11,7 @@ from TaximSensor.Basics.CalibData import CalibData, read_calib_np
 import TaximSensor.Basics.params as pr
 import TaximSensor.Basics.sensorParams as psp
 import TaximSensor.Core as Core
-from TaximSensor.helpers import smooth_mesh, invert_homogeneous_matrix, smooth_heightmap_mm, build_trimesh_from_mujoco_mesh, build_trimesh_from_mujoco_primitive, bgr_to_rgb, rgb_to_bgr
+from TaximSensor.helpers import _body_ids_in_contact, _penetration_stats_between_body_and_geom, _penetration_stats_between_geoms, smooth_mesh, invert_homogeneous_matrix, smooth_heightmap_mm, build_trimesh_from_mujoco_mesh, build_trimesh_from_mujoco_primitive, bgr_to_rgb, rgb_to_bgr
 __version__ = "0.1"  # Source of truth for mujoco-taxim's version
 
 _exported_dunders = {
@@ -76,7 +76,7 @@ class TaximSensor(object):
         self.sensor_type = sensor_type
         self.obj_mesh = {}
         self.object_links = {}
-        self.object_body_ids = set()
+        self.object_body_ids = {}
         self.saved=False 
         # polytable
         calib_data = f"{sensor_type}/polycalib.npz"
@@ -133,74 +133,46 @@ class TaximSensor(object):
         self.bg_proc_rot = self.bgs_rot[bg_index]
         self.bg_index = bg_index
 
-    def add_object_mujoco(self, obj_name, model, data, mesh_name=None, obj_type=mj.mjtObj.mjOBJ_BODY):
+    def add_geom_mujoco(self, geom_name: str, model, data, mesh_name: str):
         """
-        Add an object to the list of objects to be tracked by the sensor.
-        The given obj_name is used to find the corresponding mesh's name as defined in the xml, by appending _mesh.
-        e.g. if obj_name is "box_geom", the mesh name must be "box_geom_mesh".
-        This mesh is converted to pointcloud format and tracked by the sensor in subsequent updates.
-        Since it requires the corresponding object body's pose in the simulation, at least one mj_step should be called
+        Add a mjGEOM to the list of objects to be tracked by the sensor.
+        Other object types are not supported, as a 3D object in mujoco necessarily requires a geom tag, and we are
+            only interested in the pose of that geom for rendering, not the body.
+        Primitive geometries are handled accordingly.
+
+        Since it requires the corresponding geom's pose in the simulation, at least one mj_step should be called
         before this function.
 
-        :param obj_name: str
-            Name of the body to be added. This is defined as a mujoco body, and its associated mesh is expected to be
-            defined in the mujoco model with the name obj_name + "_mesh", unless provided otherwise.
+        :param geom_name: str
+            Name of the geom to be added. This is defined as a mujoco <geom> tag.
         :param model: mjModel
         :param data: mjData
-        :param mesh_name: str, optional
-            Name of the mesh to be used for the object. If not provided, it defaults to obj_name + "_mesh".
-            This is useful if the mesh name differs from the default convention of appending "_mesh" to the body name.
-        :param obj_type: mj.mjtObj, optional
-            either a mjOBJ_BODY or mjOBJ_GEOM. Defaults to mjOBJ_BODY.
+        :param mesh_name: str
+            Name of the ground truth mesh to be used for the object, i.e. the one to be simulated.
         """
-        if(obj_type == mj.mjtObj.mjOBJ_BODY):
-            obj_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, obj_name)
-            body_id = obj_id
-        elif(obj_type == mj.mjtObj.mjOBJ_GEOM):
-            obj_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, obj_name)
-            body_id = model.geom_bodyid[obj_id]
-        else:
-            raise ValueError(f"Unsupported object type: {obj_type}")
-        assert obj_id >= 0, f"Object {obj_name} not found in model."
+        geom_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, geom_name)
+        breakpoint()
+        obj_type = mj.mjtObj.mjOBJ_GEOM
+
+        assert geom_id >= 0, f"Geometry {geom_name} not found in model."
         # Keep track of body id for contact checking
-        self.object_body_ids.add(body_id)
-        self.object_links[obj_name] = Link(
-            obj_id, obj_type, data, model, obj_name
+        self.object_body_ids[geom_name] = model.geom_bodyid[geom_id]
+        self.object_links[geom_name] = Link(
+            geom_id, obj_type, data, model, geom_name
         )
 
-        if(obj_type == mj.mjtObj.mjOBJ_GEOM):
-            # if obj_type=GEOM, we need to check if it is a mesh or a primitive
-            geom_type = model.geom_type[obj_id]
+        # if obj_type=GEOM, we need to check if it is a mesh or a primitive
+        geom_type = model.geom_type[geom_id]
 
-            if(geom_type == mj.mjtGeom.mjGEOM_MESH):
-                # if mesh, use the mesh name for creating the trimesh
-                # Construct the trimesh
-                mesh_name = obj_name + "_mesh" if mesh_name is None else mesh_name
-                mesh_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_MESH, mesh_name)
-                assert mesh_id >= 0, f"Mesh {mesh_name} not found in model."
-                obj_mesh = build_trimesh_from_mujoco_mesh(model, mesh_id)
-            else:
-                obj_mesh = build_trimesh_from_mujoco_primitive(model, obj_id, geom_type)
-        else: 
-            # if obj_type=BODY, we assume it has a corresponding mesh defined in the model
+        if(geom_type == mj.mjtGeom.mjGEOM_MESH):
+            # if mesh, use the mesh name for creating the trimesh
             # Construct the trimesh
-            mesh_name = obj_name + "_mesh" if mesh_name is None else mesh_name
             mesh_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_MESH, mesh_name)
             assert mesh_id >= 0, f"Mesh {mesh_name} not found in model."
             obj_mesh = build_trimesh_from_mujoco_mesh(model, mesh_id)
-        self.obj_mesh[obj_name] = smooth_mesh(obj_mesh)
-
-    def add_body_mujoco(self, body, model, data, mesh_name=None):
-        '''
-        Convenience function that wraps add_object_mujoco for mjOBJ_BODY type objects.
-        '''
-        self.add_object_mujoco(body, model, data, mesh_name=mesh_name, obj_type=mj.mjtObj.mjOBJ_BODY)
-
-    def add_geom_mujoco(self, geom, model, data, mesh_name=None):
-        '''
-        Convenience function that wraps add_object_mujoco for mjOBJ_GEOM type objects.
-        '''
-        self.add_object_mujoco(geom, model, data, mesh_name=mesh_name, obj_type=mj.mjtObj.mjOBJ_GEOM)
+        else:
+            obj_mesh = build_trimesh_from_mujoco_primitive(model, geom_id, geom_type)
+        self.obj_mesh[geom_name] = smooth_mesh(obj_mesh)
 
     def add_camera_mujoco(self, sensor_name, model, data):
         """
@@ -224,7 +196,10 @@ class TaximSensor(object):
         # Remember what the associated site's body_id is for contact checking
         self.sensor_body_id = model.site_bodyid[site_id]
         self.sensor_name = sensor_name
-
+    
+    def set_sensor_pad_geom(self, geom_name):
+        self.sensor_pad_geom_name = geom_name
+    
     def get_force_mujoco(self, model, data):
         """
         Runs a contact check between the sensor and the objects in the scene.
@@ -325,23 +300,33 @@ class TaximSensor(object):
             cv2.waitKey(1)
         if cycle_bg:
             self.change_bg((self.bg_index + 1) % self.bg_len)
-        sim_img_rgb = bgr_to_rgb(sim_img)
-        return sim_img_rgb, hm_return, pcn
+        # for gelsight OFR, bgr_to_rgb(sim_img); for Digit, not needed for some reason 
+        return bgr_to_rgb(sim_img), hm_return, pcn
         
     def render_taxim(self, model, data, shadow=True, get_depth=True, img_noise_sigma=5, pcn_add_noise=False, visualize=True, cycle_bg=True):
         '''
         Renders the taxim image based on the current mujoco state, and returns the simulated image, ground truth height map, and point cloud.
 
         Returns the rendered taxim image in RGB format.
+        '''
 
         '''
-        touch_data = self.get_force_mujoco(model, data)
-        if touch_data is None:
+        Check if there are bodies in contact with the sensor
+        '''
+        bodies_in_contact = []
+        for geom_name, body_id in self.object_body_ids.items():
+            _, max_pen, _ = _penetration_stats_between_body_and_geom(model, data, body_id, self.sensor_pad_geom_name)
+            if max_pen > 0:
+                bodies_in_contact.append(geom_name)
+        
+        if len(bodies_in_contact) == 0:
             sim_img = self.bg_proc.astype(np.float64)
             hm_return = np.zeros((psp.h, psp.w))
             pcn = np.array([])
+            gt_height_map = np.zeros((psp.h, psp.w))
         else:
-            obj_name = [*touch_data][0]
+            # We assume that only 1 object is in contact at any given moment
+            obj_name = bodies_in_contact[0]
             wPs, wRs = self.sensor.get_pose()
             wTs = np.eye(4)
             wTs[:3, :3] = wRs
