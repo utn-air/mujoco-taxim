@@ -151,7 +151,6 @@ class TaximSensor(object):
             Name of the ground truth mesh to be used for the object, i.e. the one to be simulated.
         """
         geom_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, geom_name)
-        breakpoint()
         obj_type = mj.mjtObj.mjOBJ_GEOM
 
         assert geom_id >= 0, f"Geometry {geom_name} not found in model."
