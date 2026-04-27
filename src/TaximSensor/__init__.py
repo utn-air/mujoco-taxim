@@ -11,7 +11,21 @@ from TaximSensor.Basics.CalibData import CalibData, read_calib_np
 import TaximSensor.Basics.params as pr
 import TaximSensor.Basics.sensorParams as psp
 import TaximSensor.Core as Core
-from TaximSensor.helpers import _body_ids_in_contact, _penetration_stats_between_body_and_geom, _penetration_stats_between_geoms, smooth_mesh, invert_homogeneous_matrix, smooth_heightmap_mm, build_trimesh_from_mujoco_mesh, build_trimesh_from_mujoco_primitive, bgr_to_rgb, rgb_to_bgr
+import norm2tex.normals as Normals
+from TaximSensor.helpers import (
+    _penetration_stats_between_body_and_geom, 
+    invert_homogeneous_matrix, 
+    build_trimesh_from_mujoco_mesh, 
+    build_trimesh_from_mujoco_primitive, 
+    bgr_to_rgb, 
+    rgb_to_bgr, 
+    build_trimesh_with_uvs_from_mujoco_mesh,
+    )
+from norm2tex.timing import (
+    timed,
+    print_timings,
+    reset_timings
+)
 __version__ = "0.1"  # Source of truth for mujoco-taxim's version
 
 _exported_dunders = {
@@ -133,7 +147,7 @@ class TaximSensor(object):
         self.bg_proc_rot = self.bgs_rot[bg_index]
         self.bg_index = bg_index
 
-    def add_geom_mujoco(self, geom_name: str, model, data, mesh_name: str):
+    def add_geom_mujoco(self, geom_name: str, model, data, mesh_name: str, normal_map_path: str=None):
         """
         Add a mjGEOM to the list of objects to be tracked by the sensor.
         Other object types are not supported, as a 3D object in mujoco necessarily requires a geom tag, and we are
@@ -168,10 +182,40 @@ class TaximSensor(object):
             # Construct the trimesh
             mesh_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_MESH, mesh_name)
             assert mesh_id >= 0, f"Mesh {mesh_name} not found in model."
-            obj_mesh = build_trimesh_from_mujoco_mesh(model, mesh_id)
+            obj_mesh, uvs = build_trimesh_with_uvs_from_mujoco_mesh(model, mesh_id)
         else:
             obj_mesh = build_trimesh_from_mujoco_primitive(model, geom_id, geom_type)
-        self.obj_mesh[geom_name] = smooth_mesh(obj_mesh)
+        if normal_map_path is not None:
+            # Load all the normal map related data at add
+            if not hasattr(self, "obj_uvs"):
+                self.obj_uvs = {}
+            if not hasattr(self, "obj_pseudo_height"):
+                self.obj_pseudo_height = {}
+            if not hasattr(self, "obj_trimesh"):
+                self.obj_trimesh = {}
+            if not hasattr(self, "obj_uv_tris"):
+                self.obj_uv_tris = {}
+            if not hasattr(self, "obj_normal_tris"):
+                self.obj_normal_tris = {}
+            self.obj_trimesh[geom_name] = obj_mesh 
+            self.obj_uvs[geom_name] = uvs
+            faces_i = obj_mesh.faces.astype(np.int32, copy=False)
+            self.obj_uv_tris[geom_name] = np.asarray(uvs, dtype=np.float32)[faces_i]
+            vertex_normals = np.asarray(obj_mesh.vertex_normals, dtype=np.float32)
+            self.obj_normal_tris[geom_name] = vertex_normals[faces_i]
+            self.obj_pseudo_height[geom_name] = Normals.approximate_height_map_from_normal_map(
+                normal_map_path,
+                invert_y=False,
+            )
+            # normalize and repeat to 3 channels for visualization
+            depth_vis_gray = Normals.pseudo_height_to_uint8_image(
+                self.obj_pseudo_height[geom_name]
+            )
+            depth_vis = np.repeat(depth_vis_gray[:, :, np.newaxis], 3, axis=2)
+            cv2.imwrite(f"{geom_name}_pseudo_height_vis.png", depth_vis)
+
+        # self.obj_mesh[geom_name] = self.obj_trimesh[geom_name] if normal_map_path is not None else obj_mesh
+        self.obj_mesh[geom_name] = obj_mesh
 
     def add_camera_mujoco(self, sensor_name, model, data):
         """
@@ -323,6 +367,7 @@ class TaximSensor(object):
             hm_return = np.zeros((psp.h, psp.w))
             pcn = np.array([])
             gt_height_map = np.zeros((psp.h, psp.w))
+            overlay = np.zeros((psp.h, psp.w))
         else:
             # We assume that only 1 object is in contact at any given moment
             obj_name = bodies_in_contact[0]
@@ -335,11 +380,15 @@ class TaximSensor(object):
             wTo[:3, :3] = wRo
             wTo[:3, 3] = wPo * 1000.0 # change to mm
 
-            # f1: 0.025, deform: 0.025, sim: 0.15
-            height_map, gel_map, contact_mask, press_depth, gt_height_map, pcn = self.generateHeightMapWithTransform(wTs, wTo, obj_name, pcn_add_noise=pcn_add_noise)
-            heightMap, contact_mask, contact_height = Core.deformApprox(press_depth, height_map, gel_map, contact_mask)
-            sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
-            sim_img = sim_img if not shadow else shadow_sim_img
+            # heightmap: 0.65, deform: 0.025, sim: 0.05
+            with timed("a_hm_gen"):
+                height_map, gel_map, contact_mask, press_depth, gt_height_map, pcn, overlay = self.generateHeightMapWithTransform(wTs, wTo, obj_name, pcn_add_noise=pcn_add_noise)
+            with timed("b_deform_approx"):
+                heightMap, contact_mask, contact_height = Core.deformApprox(press_depth, height_map, gel_map, contact_mask)
+            with timed("c_simulating"):
+                sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
+                sim_img = sim_img if not shadow else shadow_sim_img
+            print_timings()
         
         # add some gaussian noise to simulate real sensor noise
         noise_sigma = img_noise_sigma
@@ -351,7 +400,11 @@ class TaximSensor(object):
         hm_return = gt_height_map if get_depth else np.zeros((psp.w, psp.h))
         hm_return = cv2.rotate(hm_return, cv2.ROTATE_90_COUNTERCLOCKWISE)
         hm_return = cv2.resize(hm_return, self.resize) if self.resize is not None else hm_return
-        
+
+        ol_return = overlay if get_depth else np.zeros((psp.w, psp.h))
+        ol_return = cv2.rotate(ol_return, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        ol_return = cv2.resize(ol_return, self.resize) if self.resize is not None else ol_return
+
         if(visualize):
             if not get_depth:
                 combined_img = sim_img
@@ -360,7 +413,12 @@ class TaximSensor(object):
                 gt_vis = np.repeat(hm_return[:, :, np.newaxis], 3, axis=2)
                 div = 1 if np.max(gt_vis) == 0 else np.max(gt_vis)
                 gt_vis = (gt_vis / div * 255).astype(np.uint8)
-                combined_img = np.concatenate((sim_img, gt_vis), axis=1)
+
+                overlay_vis = np.repeat(ol_return[:, :, np.newaxis], 3, axis=2)
+                div_ov = 1 if np.max(overlay_vis) == 0 else np.max(overlay_vis)
+                overlay_vis = (overlay_vis / div_ov * 255).astype(np.uint8)
+
+                combined_img = np.concatenate((sim_img, gt_vis, overlay_vis), axis=1)
             cv2.imshow("taxim", combined_img)
             cv2.waitKey(1)
         if cycle_bg:
@@ -590,7 +648,7 @@ class TaximSensor(object):
         shadow_sim_img = cv2.GaussianBlur(shadow_sim_img.astype(np.float32), (pr.kernel_size, pr.kernel_size), 0)
         return sim_img, shadow_sim_img
 
-    def generateHeightMapWithTransform(self, wTs, wTo, obj_name, pressing_mm_max = 3.0, pcn_add_noise=False):
+    def generateHeightMapWithTransform(self, wTs, wTo, obj_name, pressing_mm_max = 3.0, return_pcn=False, pcn_add_noise=False):
         """
         Generate the height map by interacting the object with the gelpad model.
 
@@ -622,8 +680,27 @@ class TaximSensor(object):
             psp.pixmm,
         )
         heightMap = Core.heightmap_from_zbuf(zbuf, psp.pixmm)
+        overlay = np.zeros_like(heightMap)
+        with timed("apply_uv_normals"):
+            if hasattr(self, "obj_uvs"):
+                if(obj_name in self.obj_uvs):
+                    heightMap, overlay = Normals.apply_uv_normals(
+                        self.obj_trimesh[obj_name],
+                        self.obj_uvs[obj_name],
+                        self.obj_pseudo_height[obj_name],
+                        heightMap,
+                        sTo,
+                        psp.pixmm,
+                        bump_scale_mm=0.5,
+                        uv_tris_cache=self.obj_uv_tris[obj_name],
+                        normal_tris_cache=self.obj_normal_tris[obj_name],
+                    )
+        
         n_points = 5000
-        pcn = Core.pointcloud_from_zbuf_with_normals(zbuf, psp.pixmm, n_points=n_points, roughness_enable=pcn_add_noise)
+        pcn = None
+        if return_pcn:
+            pcn = Core.pointcloud_from_zbuf_with_normals(zbuf, psp.pixmm, n_points=n_points, roughness_enable=pcn_add_noise)
+        
         # assert pcn.shape[0] == n_points, "Pointcloud does not have the expected number of points."
 
         # pressing depth in pixel
@@ -649,7 +726,8 @@ class TaximSensor(object):
         zq[contact_mask]  = heightMap[contact_mask]
         zq[~contact_mask] = gel_map[~contact_mask]
         heightMapBlur = cv2.GaussianBlur(heightMap.astype(np.float32)/heightMap.max(),(5,5),0)
-        return zq, gel_map, contact_mask, pressing_height_mm, heightMapBlur, pcn
+
+        return zq, gel_map, contact_mask, pressing_height_mm, heightMapBlur, pcn, overlay
     
     def _get_poly_design_cache(self):
         cache_key = (psp.w, psp.h)

@@ -16,6 +16,46 @@ MuJoCo-Taxim can be easily dropped into an existing MuJoCo application/scene.
 Check `examples/mujoco` for a detailed use case on how to achieve this.
 Currently, MuJoCo-Taxim can only simulate the tactile image of one object in a given step, but doing multi-geom simulation is planned.
 
+## Normal map-based texture support
+This branch now supports using normal maps to inject additional texture into the rendered Taxim image, allowing for richer tactile image simulation. 
+
+To aid in this, it is shipped with a blender-based procedural normal map and color texture generation pipeline, along with the corresponding `.blend` file that contains the procedural materials.
+
+For a given mesh in `.obj` format, you can easily generate the corresponding texture with the `examples/blender/bake_procedural_material.py` script with the following script:
+
+```bash
+blender --background --python examples/blender/bake_procedural_material.py -- \
+  --obj /path/to/mesh.obj \
+  --blend examples/blender/proc_materials.blend \
+  --material-config examples/blender/rocky.json \
+  --output-dir /path/to/output \
+  --uv-angle-limit 66 \
+  --samples 128 \
+  --image-size 2048
+```
+
+At the moment, we support 6 different materials:
+- `Wood`
+- `Rocky`
+- `Clay`
+- `Fabric`
+- `3DPrint`
+- `Uniform` (Voronoi texture for debugging purposes)
+
+The script does the following:
+- import an `.obj`
+- append a procedural material from the `proc_materials.blend` chosen by the JSON file passed to `--material-config`
+- apply configurable `Smart UV Project` unwrapping
+- bake color and tangent-space normal maps with Cycles
+- export the resulting color, normal and UV-baked `.obj` file to the output directory.
+
+The baked outputs are written as:
+- `{obj_name}_{material}_color.png`
+- `{obj_name}_{material}_normal.png`
+- `{obj_name}_{material}_uv.obj`
+
+These can then be used in the MuJoCo program. See the `eamples/mujoco/normal_map_test.py` for a demonstration.
+
 ## Operating System
 MuJoCo-Taxim has been tested on Ubuntu 22.04. Chances are, the package will work fine in almost any environment so long as it is capable of installing and running MuJoCo 3.
 
@@ -40,5 +80,3 @@ If you use Taxim in your research, please cite:
   year={2021}
 }
 ```
-
-

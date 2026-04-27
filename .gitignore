@@ -3,3 +3,7 @@ __pycache__/
 *.egg-info
 build/
 dist/
+*_color.png
+*_normal.png
+*_uv.obj
+*_uv.mtl

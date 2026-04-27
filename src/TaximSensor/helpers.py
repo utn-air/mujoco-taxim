@@ -255,6 +255,67 @@ def build_trimesh_from_mujoco_mesh(model, mesh_id):
     return mesh
 
 
+def build_trimesh_with_uvs_from_mujoco_mesh(model, mesh_id):
+    """
+    Construct a trimesh mesh directly from MuJoCo mesh buffers, preserving the
+    same local-frame orientation as `build_trimesh_from_mujoco_mesh` while also
+    attaching UVs from MuJoCo's texcoord buffers.
+
+    MuJoCo stores texture coordinates per face-corner, not strictly per unique
+    vertex, so we duplicate vertices per triangle corner to keep geometry and UVs
+    exactly aligned.
+
+    Returns
+    -------
+    mesh : trimesh.Trimesh
+        Mesh in the same MuJoCo mesh-local coordinates as `model.mesh_vert`.
+    uvs : np.ndarray
+        Per-vertex UVs aligned with `mesh.vertices`.
+    """
+    start_vert = model.mesh_vertadr[mesh_id]
+    num_vert = model.mesh_vertnum[mesh_id]
+    vertices = np.asarray(
+        model.mesh_vert[start_vert : start_vert + num_vert].reshape(-1, 3),
+        dtype=np.float64,
+    )
+
+    start_face = model.mesh_faceadr[mesh_id]
+    num_face = model.mesh_facenum[mesh_id]
+    faces = np.asarray(
+        model.mesh_face[start_face : start_face + num_face].reshape(-1, 3),
+        dtype=np.int32,
+    )
+
+    texcoord_adr = int(model.mesh_texcoordadr[mesh_id])
+    texcoord_num = int(model.mesh_texcoordnum[mesh_id])
+    if texcoord_adr < 0 or texcoord_num <= 0:
+        raise ValueError(f"MuJoCo mesh id {mesh_id} does not contain texture coordinates.")
+
+    texcoords = np.asarray(
+        model.mesh_texcoord[texcoord_adr : texcoord_adr + texcoord_num].reshape(-1, 2),
+        dtype=np.float64,
+    )
+
+    face_texcoords = np.asarray(
+        model.mesh_facetexcoord[start_face : start_face + num_face].reshape(-1, 3),
+        dtype=np.int32,
+    )
+
+    # Expand to one vertex per face-corner so UV seams are preserved exactly.
+    expanded_vertices = vertices[faces.reshape(-1)]
+    expanded_uvs = texcoords[face_texcoords.reshape(-1)]
+    expanded_faces = np.arange(len(expanded_vertices), dtype=np.int32).reshape(-1, 3)
+
+    visual = trimesh.visual.texture.TextureVisuals(uv=expanded_uvs)
+    mesh = trimesh.Trimesh(
+        vertices=expanded_vertices,
+        faces=expanded_faces,
+        visual=visual,
+        process=False,
+    )
+    return mesh, expanded_uvs
+
+
 def build_trimesh_from_mujoco_primitive(model, geom_id, geom_type):
     """
     Construct a trimesh.Mesh from a MuJoCo primitive geom.

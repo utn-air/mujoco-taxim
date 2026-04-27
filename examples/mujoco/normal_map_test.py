@@ -16,12 +16,12 @@ import numpy as np
 
 # Taxim imports 
 from TaximSensor import TaximSensor
-
+from norm2tex.normals import save_pseudo_height_debug_png
 np.set_printoptions(precision=3, suppress=True)
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONTROL_INCREMENT = 0.0005  # Amount to move joints per keypress
 
-SCENE_ROOT = os.path.join(CURRENT_DIR, "xml")
+SCENE_ROOT = os.path.join(CURRENT_DIR, "normal_xml")
 SCENE_FILE = os.path.join(SCENE_ROOT, "touch_playground_rot.xml")
 TACTO_DIR = os.path.join(CURRENT_DIR, "..", "tacto", "assets")
 CONFIG_DIR = os.path.join(CURRENT_DIR, "..", "tacto", "cfg")
@@ -78,7 +78,6 @@ def main():
     model.opt.timestep = 0.001
     mj.mj_step(model, data) # step to initialize object poses
     
-
     #--------------------#
     # Taxim Sensor Setup #
     #--------------------#
@@ -93,12 +92,17 @@ def main():
     sim = TaximSensor(sensor_type="digit", bg_file=None, bg_index=0, resize=None, preprocess_bg=True)
 
     # For the sensor to work, the desired object in mujoco needs to be added.
-    sim.add_geom_mujoco("can_geom", model=model, data=data, mesh_name="can_mesh")
+    sim.add_geom_mujoco("can_geom", model=model, data=data, mesh_name="can_mesh", normal_map_path="/home/sbien/Documents/Development/V2T/mujoco-taxim-private/examples/mujoco/normal_xml/assets/target_objs/golf_small_Wood_normal.png")
+    # save_pseudo_height_debug_png(normal_map_path="/home/sbien/Documents/Development/Vision2Touch/Taxim/examples/mujoco/normal_xml/assets/target_objs/golf_normal.png",
+    #                              output_path="/home/sbien/Documents/Development/Vision2Touch/Taxim/examples/mujoco/normal_xml/assets/target_objs/golf_pseudo_height_debug.png",)
+                                 
+    # exit()
     # Additionally, the site that acts as the surface of the sensor needs to be added.
     # The site should align with the surface of the sensor, as Taxim determines which part to render using the site's xy-plane.
     sim.add_camera_mujoco("left_tacto_pad", model, data)
     sim.set_sensor_pad_geom("finger_1_left_0")
-    
+
+
     #----------------------------#
     # MuJoCo Visualization Setup #
     #----------------------------#
@@ -134,7 +138,7 @@ def main():
                          img_noise_sigma=5, # Gaussian noise to add to the rgb image 
                          pcn_add_noise=False, # Add noise to the returned point cloud-normal?
                          visualize=True, # visualize the render? 
-                         cycle_bg=True) # cycle through the background image after every render?
+                         cycle_bg=False) # cycle through the background image after every render?
 
         # Render the scene
         viewport_width, viewport_height = glfw.get_framebuffer_size(window)
