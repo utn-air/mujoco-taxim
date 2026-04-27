@@ -166,6 +166,7 @@ class TaximSensor(object):
         """
         geom_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, geom_name)
         obj_type = mj.mjtObj.mjOBJ_GEOM
+        uvs = None
 
         assert geom_id >= 0, f"Geometry {geom_name} not found in model."
         # Keep track of body id for contact checking
@@ -182,10 +183,14 @@ class TaximSensor(object):
             # Construct the trimesh
             mesh_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_MESH, mesh_name)
             assert mesh_id >= 0, f"Mesh {mesh_name} not found in model."
-            obj_mesh, uvs = build_trimesh_with_uvs_from_mujoco_mesh(model, mesh_id)
+            try:
+                obj_mesh, uvs = build_trimesh_with_uvs_from_mujoco_mesh(model, mesh_id)
+            except ValueError:
+                print(f"WARNING: Mesh {mesh_name} does not contain UVs. Falling back to non-UV mesh.")
+                obj_mesh = build_trimesh_from_mujoco_mesh(model, mesh_id)
         else:
             obj_mesh = build_trimesh_from_mujoco_primitive(model, geom_id, geom_type)
-        if normal_map_path is not None:
+        if normal_map_path is not None and uvs is not None:
             # Load all the normal map related data at add
             if not hasattr(self, "obj_uvs"):
                 self.obj_uvs = {}
