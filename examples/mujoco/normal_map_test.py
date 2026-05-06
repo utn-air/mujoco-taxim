@@ -92,11 +92,13 @@ def main():
     sim = TaximSensor(sensor_type="digit", bg_file=None, bg_index=0, resize=None, preprocess_bg=True)
 
     # For the sensor to work, the desired object in mujoco needs to be added.
-    sim.add_geom_mujoco("can_geom", model=model, data=data, mesh_name="can_mesh", normal_map_path="/home/sbien/Documents/Development/V2T/mujoco-taxim-private/examples/mujoco/normal_xml/assets/target_objs/golf_small_Wood_normal.png")
-    # save_pseudo_height_debug_png(normal_map_path="/home/sbien/Documents/Development/Vision2Touch/Taxim/examples/mujoco/normal_xml/assets/target_objs/golf_normal.png",
-    #                              output_path="/home/sbien/Documents/Development/Vision2Touch/Taxim/examples/mujoco/normal_xml/assets/target_objs/golf_pseudo_height_debug.png",)
-                                 
-    # exit()
+    sim.add_geom_mujoco("can_geom", 
+                        model=model, 
+                        data=data, 
+                        mesh_name="can_mesh", 
+                        normal_map_path="/home/sbien/Documents/Development/V2T/mujoco-taxim/examples/mujoco/normal_xml/assets/target_objs/golf_small_3DPrint_normal.png"
+                        )
+
     # Additionally, the site that acts as the surface of the sensor needs to be added.
     # The site should align with the surface of the sensor, as Taxim determines which part to render using the site's xy-plane.
     sim.add_camera_mujoco("left_tacto_pad", model, data)
@@ -151,7 +153,4 @@ def main():
         glfw.poll_events()
 
 if __name__ == "__main__":
-    # hydra.initialize_config_dir(CONFIG_DIR, version_base=None)
-    # script_dir = CURRENT_DIR
-    # cfg = hydra.compose("digit.yaml", overrides=[f"base_dir={script_dir}"])
     main()
