@@ -73,7 +73,16 @@ class Link:
 
 
 class TaximSensor(object):
-    def __init__(self, sensor_type="digit", bg_file=None, bg_index=0, resize=None, preprocess_bg=True):
+    def __init__(
+        self,
+        sensor_type="digit",
+        bg_file=None,
+        bg_index=0,
+        resize=None,
+        preprocess_bg=True,
+        texture_bump_scale_mm=0.05,
+        texture_uv_supersample=1,
+    ):
         '''
         Initialize the simulator.
         1) load the calibration files,
@@ -96,6 +105,8 @@ class TaximSensor(object):
         calib_data = f"{sensor_type}/polycalib.npz"
         self.calib_data = CalibData(calib_data)
         self.resize=resize
+        self.texture_bump_scale_mm = texture_bump_scale_mm
+        self.texture_uv_supersample = max(1, int(texture_uv_supersample))
 
         # raw calibration data, here only used for background
         if bg_file is None:
@@ -147,7 +158,7 @@ class TaximSensor(object):
         self.bg_proc_rot = self.bgs_rot[bg_index]
         self.bg_index = bg_index
 
-    def add_geom_mujoco(self, geom_name: str, model, data, mesh_name: str, normal_map_path: str=None):
+    def add_geom_mujoco(self, geom_name: str, model, data, mesh_name: str, normal_map_path: str=None, texture_map_direction=Normals.BUMP_DIRECTION.ZERO_CENTERED):
         """
         Add a mjGEOM to the list of objects to be tracked by the sensor.
         Other object types are not supported, as a 3D object in mujoco necessarily requires a geom tag, and we are
@@ -211,6 +222,7 @@ class TaximSensor(object):
             self.obj_pseudo_height[geom_name] = Normals.approximate_height_map_from_normal_map(
                 normal_map_path,
                 invert_y=False,
+                bump_direction=texture_map_direction,
             )
             # normalize and repeat to 3 channels for visualization
             depth_vis_gray = Normals.pseudo_height_to_uint8_image(
@@ -350,7 +362,22 @@ class TaximSensor(object):
             self.change_bg((self.bg_index + 1) % self.bg_len)
         # for gelsight OFR, bgr_to_rgb(sim_img); for Digit, not needed for some reason 
         return bgr_to_rgb(sim_img), hm_return, pcn
-        
+    
+    def render_blank_taxim(self, shadow=True):
+        gel_map = self.gel_map.copy()
+        height_map = np.zeros((psp.h, psp.w))
+        press_depth = 0.0
+        contact_mask = height_map > gel_map
+        # heightMap, contact_mask, contact_height = Core.deformApprox(press_depth, height_map, gel_map, contact_mask)
+        heightMap = np.zeros((psp.h, psp.w))
+        contact_height = np.zeros((psp.h, psp.w))
+        sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
+        sim_img = sim_img if not shadow else shadow_sim_img
+        sim_img  = cv2.rotate(np.clip(np.rint(sim_img), 0, 255).astype(np.uint8), cv2.ROTATE_90_COUNTERCLOCKWISE)
+        sim_img = cv2.resize(sim_img, self.resize) if self.resize is not None else sim_img
+
+        return bgr_to_rgb(sim_img)
+
     def render_taxim(self, model, data, shadow=True, get_depth=True, img_noise_sigma=5, pcn_add_noise=False, visualize=True, cycle_bg=True):
         '''
         Renders the taxim image based on the current mujoco state, and returns the simulated image, ground truth height map, and point cloud.
@@ -367,6 +394,10 @@ class TaximSensor(object):
             if max_pen > 0:
                 bodies_in_contact.append(geom_name)
         
+        debug_base_height = np.zeros((psp.h, psp.w), dtype=np.float32)
+        debug_bumpy_height = np.zeros((psp.h, psp.w), dtype=np.float32)
+        debug_contact_mask = np.zeros((psp.h, psp.w), dtype=bool)
+
         if len(bodies_in_contact) == 0:
             sim_img = self.bg_proc.astype(np.float64)
             hm_return = np.zeros((psp.h, psp.w))
@@ -388,16 +419,34 @@ class TaximSensor(object):
             # heightmap: 0.65, deform: 0.025, sim: 0.05
             with timed("a_hm_gen"):
                 height_map, gel_map, contact_mask, press_depth, gt_height_map, pcn, overlay = self.generateHeightMapWithTransform(wTs, wTo, obj_name, pcn_add_noise=pcn_add_noise)
+                debug_bumpy_height = np.asarray(height_map, dtype=np.float32)
+                debug_contact_mask = np.asarray(contact_mask, dtype=bool)
+                debug_base_height = np.clip(debug_bumpy_height - np.asarray(overlay, dtype=np.float32), 0.0, None)
             with timed("b_deform_approx"):
                 heightMap, contact_mask, contact_height = Core.deformApprox(press_depth, height_map, gel_map, contact_mask)
             with timed("c_simulating"):
                 sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
                 sim_img = sim_img if not shadow else shadow_sim_img
-            print_timings()
+            # print_timings()
         
         # add some gaussian noise to simulate real sensor noise
+        # noise_sigma = img_noise_sigma
+        # noise = np.random.normal(0, noise_sigma, sim_img.shape).astype(sim_img.dtype)
         noise_sigma = img_noise_sigma
-        noise = np.random.normal(0, noise_sigma, sim_img.shape).astype(sim_img.dtype)
+        grain_size = 4  # bigger = chunkier noise
+
+        h, w = sim_img.shape[:2]
+        c = 1 if sim_img.ndim == 2 else sim_img.shape[2]
+
+        small_h = max(1, h // grain_size)
+        small_w = max(1, w // grain_size)
+
+        # one noise value per coarse block
+        coarse_noise = np.random.normal(0, noise_sigma, (small_h, small_w, c)).astype(np.float32)
+
+        # upscale with nearest-neighbor so blocks stay visible
+        noise = cv2.resize(coarse_noise, (w, h), interpolation=cv2.INTER_NEAREST)
+
         sim_img = cv2.add(sim_img, noise)
         sim_img  = cv2.rotate(np.clip(np.rint(sim_img), 0, 255).astype(np.uint8), cv2.ROTATE_90_COUNTERCLOCKWISE)
         sim_img = cv2.resize(sim_img, self.resize) if self.resize is not None else sim_img
@@ -425,7 +474,36 @@ class TaximSensor(object):
 
                 combined_img = np.concatenate((sim_img, gt_vis, overlay_vis), axis=1)
             cv2.imshow("taxim", combined_img)
-            cv2.waitKey(1)
+            cv2.waitKey(0)
+
+        # if get_depth:
+        #     debug_base = cv2.rotate(debug_base_height, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        #     debug_bumpy = cv2.rotate(debug_bumpy_height, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        #     debug_mask = cv2.rotate(debug_contact_mask.astype(np.uint8) * 255, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        #     debug_overlay = cv2.rotate(np.asarray(overlay, dtype=np.float32), cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+        #     if self.resize is not None:
+        #         debug_base = cv2.resize(debug_base, self.resize)
+        #         debug_bumpy = cv2.resize(debug_bumpy, self.resize)
+        #         debug_mask = cv2.resize(debug_mask, self.resize, interpolation=cv2.INTER_NEAREST)
+        #         debug_overlay = cv2.resize(debug_overlay, self.resize)
+
+        #     base_max = float(np.max(debug_bumpy)) if np.max(debug_bumpy) > 0 else 1.0
+        #     overlay_abs_max = float(np.max(np.abs(debug_overlay))) if np.max(np.abs(debug_overlay)) > 0 else 1.0
+
+        #     debug_base_vis = (np.clip(debug_base / base_max, 0.0, 1.0) * 255).astype(np.uint8)
+        #     debug_bumpy_vis = (np.clip(debug_bumpy / base_max, 0.0, 1.0) * 255).astype(np.uint8)
+        #     debug_overlay_vis = (
+        #         np.clip((debug_overlay / (2.0 * overlay_abs_max)) + 0.5, 0.0, 1.0) * 255
+        #     ).astype(np.uint8)
+            # import time
+            # if time.time() % 2 < 0.1:
+            #     uuid = int(time.time())
+            #     cv2.imwrite(f"{uuid}_debug_base_raw.png", debug_base_vis)
+            #     cv2.imwrite(f"{uuid}_debug_bumpy_raw.png", debug_bumpy_vis)
+            #     cv2.imwrite(f"{uuid}_debug_overlay_signed.png", debug_overlay_vis)
+            #     cv2.imwrite(f"{uuid}_debug_contact_mask.png", debug_mask)
+
         if cycle_bg:
             self.change_bg((self.bg_index + 1) % self.bg_len)
         return bgr_to_rgb(sim_img), hm_return, pcn
@@ -696,7 +774,8 @@ class TaximSensor(object):
                         heightMap,
                         sTo,
                         psp.pixmm,
-                        bump_scale_mm=0.5,
+                        bump_scale_mm=self.texture_bump_scale_mm,
+                        supersample=self.texture_uv_supersample,
                         uv_tris_cache=self.obj_uv_tris[obj_name],
                         normal_tris_cache=self.obj_normal_tris[obj_name],
                     )
@@ -704,6 +783,7 @@ class TaximSensor(object):
         n_points = 5000
         pcn = None
         if return_pcn:
+            print("pcn")
             pcn = Core.pointcloud_from_zbuf_with_normals(zbuf, psp.pixmm, n_points=n_points, roughness_enable=pcn_add_noise)
         
         # assert pcn.shape[0] == n_points, "Pointcloud does not have the expected number of points."

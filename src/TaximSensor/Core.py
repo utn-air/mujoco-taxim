@@ -72,9 +72,10 @@ def deformApprox(pressing_height_mm, height_map, gel_map, contact_mask):
 def zbuf_rasterize_numba(us, vs, zs, H, W):
     """
     us,vs,zs: (F,3) float32 arrays of triangle vertex coords in pixel space (u,v) and depth z (mm)
-    Returns zbuf (H,W) float32 min-z per pixel.
+    Returns zbuf (H,W) float32 closest-to-gel z per pixel, i.e. the
+    largest negative z (nearest visible surface in sensor frame).
     """
-    zbuf = np.full((H, W), np.inf, dtype=np.float32)
+    zbuf = np.full((H, W), -np.inf, dtype=np.float32)
 
     F = us.shape[0]
     for f in range(F):
@@ -117,9 +118,13 @@ def zbuf_rasterize_numba(us, vs, zs, H, W):
 
                 if w0 >= 0.0 and w1 >= 0.0 and w2 >= 0.0:
                     z = w0 * z0 + w1 * z1 + w2 * z2
-                    if z < zbuf[v, u]:
+                    if z < 0.0 and z > zbuf[v, u]:
                         zbuf[v, u] = z
 
+    for y in range(H):
+        for x in range(W):
+            if zbuf[y, x] == -np.inf:
+                zbuf[y, x] = np.inf
     return zbuf
 
 def rasterize_depth_from_trimesh(
@@ -446,12 +451,6 @@ def pointcloud_from_zbuf_with_normals(
 
             height_fill_mm = height_fill_mm.copy()
             height_fill_mm[M] = np.maximum(height_fill_mm[M] + delta_mm[M], 0.0)
-    # debug_height_fill_mm = height_fill_mm.copy()
-    # debug_height_fill_mm = np.repeat(debug_height_fill_mm[:, :, np.newaxis], 3, axis=2)  # (H,W,3)
-    
-    # div = float(z_max) if z_max > 1e-8 else 1.0
-    # cv2.imwrite("debug_height_fill.png", (debug_height_fill_mm / div * 255.0).clip(0, 255).astype(np.uint8))
-    # breakpoint()
 
     # ----------------------------
     # 2) Define coordinate mapping + compute normals in output space
@@ -568,4 +567,3 @@ def pointcloud_from_zbuf_with_normals(
 
     ret = np.hstack([pts, normals]).astype(np.float16)
     return ret
-

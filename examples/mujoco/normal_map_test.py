@@ -89,14 +89,16 @@ def main():
     # bg_index specifies which background image to use in the provided/default npz file.
     # Resize does what it says, in the format (new_h, new_w); output image will be scaled to this.
     # preprocess_bg applies a gaussian blur to the background image.
-    sim = TaximSensor(sensor_type="digit", bg_file=None, bg_index=0, resize=None, preprocess_bg=True)
+    sim = TaximSensor(sensor_type="digit", bg_file=None, bg_index=0, resize=None, preprocess_bg=True, texture_bump_scale_mm=0.2)
 
+    from norm2tex.normals import BUMP_DIRECTION
     # For the sensor to work, the desired object in mujoco needs to be added.
     sim.add_geom_mujoco("can_geom", 
                         model=model, 
                         data=data, 
                         mesh_name="can_mesh", 
-                        normal_map_path="/home/sbien/Documents/Development/V2T/mujoco-taxim/examples/mujoco/normal_xml/assets/target_objs/golf_small_3DPrint_normal.png"
+                        normal_map_path="/home/sbien/Documents/Development/V2T/mujoco-taxim/examples/mujoco/normal_xml/assets/target_objs/golf_small_Fabric_normal.png",
+                        texture_map_direction=BUMP_DIRECTION.AWAY_FROM_SENSOR 
                         )
 
     # Additionally, the site that acts as the surface of the sensor needs to be added.

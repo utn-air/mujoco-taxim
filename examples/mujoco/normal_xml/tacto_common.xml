@@ -58,8 +58,8 @@
         <mesh file="assets/digit_gripper/digit_stub_full_1.obj" name="finger_1" />
 
         <!-- for testing with demo_mujoco_digit.py -->
-        <mesh name="can_mesh" file="assets/target_objs/golf_small_Wood_uv.obj" scale="1 1 1" />
-        <texture name="can_texture" type="2d" file="assets/target_objs/golf_small_Wood_color.png"/>
+        <mesh name="can_mesh" file="assets/target_objs/golf_small_Fabric_uv.obj" scale="1 1 1" />
+        <texture name="can_texture" type="2d" file="assets/target_objs/golf_small_Fabric_color.png"/>
         <material name="can_material" texture="can_texture" specular="0.5" shininess="0.5" rgba="1 1 1 1"/>
 
         <material name="blue_material" specular="0.0" shininess="0.0" rgba="0.0000 0.0000 1 1" />
