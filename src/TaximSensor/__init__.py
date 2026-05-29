@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 import numpy as np
 from scipy.ndimage import gaussian_filter
 import scipy.ndimage as ndimage
@@ -77,6 +78,7 @@ class TaximSensor(object):
         self,
         sensor_type="digit",
         bg_file=None,
+        gelmap_file=None,
         bg_index=0,
         resize=None,
         preprocess_bg=True,
@@ -140,7 +142,13 @@ class TaximSensor(object):
         self.direction = shadowData['shadowDirections']
         self.shadowTable = shadowData['shadowTable']
 
-        self.gel_map = read_calib_np("gelmap5.npy")
+        if gelmap_file is None:
+            self.gel_map = read_calib_np("gelmap5.npy")
+        else:
+            self.gel_map = read_calib_np(gelmap_file)
+            assert self.gel_map.shape == (480, 640), "Gelmap shape should be (480, 640) to stay consistent with original gelmap."
+            assert self.gel_map.max() <= 169.5, "Gelmap max should not exceed 169.5 to stay consistent with original gelmap."
+            assert self.gel_map.min() >= 122.0, "Gelmap min should not be less than 122.0 to stay consistent with original gelmap."
         self.gel_map = cv2.GaussianBlur(self.gel_map.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
 
     def get_current_bg(self):
@@ -158,7 +166,16 @@ class TaximSensor(object):
         self.bg_proc_rot = self.bgs_rot[bg_index]
         self.bg_index = bg_index
 
-    def add_geom_mujoco(self, geom_name: str, model, data, mesh_name: str, normal_map_path: str=None, texture_map_direction=Normals.BUMP_DIRECTION.ZERO_CENTERED):
+    def add_geom_mujoco(
+        self,
+        geom_name: str,
+        model,
+        data,
+        mesh_name: str,
+        normal_map_path: str = None,
+        texture_map_direction=Normals.BUMP_DIRECTION.ZERO_CENTERED,
+        normal_map_structure=Normals.NORMAL_MAP_STRUCTURE.STRUCTURED,
+    ):
         """
         Add a mjGEOM to the list of objects to be tracked by the sensor.
         Other object types are not supported, as a 3D object in mujoco necessarily requires a geom tag, and we are
@@ -221,15 +238,21 @@ class TaximSensor(object):
             self.obj_normal_tris[geom_name] = vertex_normals[faces_i]
             self.obj_pseudo_height[geom_name] = Normals.approximate_height_map_from_normal_map(
                 normal_map_path,
-                invert_y=False,
+                # Blender bakes tangent-space normals in the OpenGL convention.
+                # Flipping the green channel here avoids reconstructing each bump
+                # as a split peak/valley response.
+                invert_y=True,
                 bump_direction=texture_map_direction,
+                normal_map_structure=normal_map_structure,
             )
             # normalize and repeat to 3 channels for visualization
             depth_vis_gray = Normals.pseudo_height_to_uint8_image(
                 self.obj_pseudo_height[geom_name]
             )
             depth_vis = np.repeat(depth_vis_gray[:, :, np.newaxis], 3, axis=2)
-            cv2.imwrite(f"{geom_name}_pseudo_height_vis.png", depth_vis)
+            output_path = Path.cwd() / f"{geom_name}_pseudo_height_vis.png"
+            cv2.imwrite(str(output_path), depth_vis)
+            print(f"Saved pseudo-height debug PNG to {output_path}")
 
         # self.obj_mesh[geom_name] = self.obj_trimesh[geom_name] if normal_map_path is not None else obj_mesh
         self.obj_mesh[geom_name] = obj_mesh
