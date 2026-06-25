@@ -379,7 +379,7 @@ class TaximSensor(object):
                 div = 1 if np.max(gt_vis) == 0 else np.max(gt_vis)
                 gt_vis = (gt_vis / div * 255).astype(np.uint8)
                 combined_img = np.concatenate((sim_img, gt_vis), axis=1)
-            cv2.imshow("taxim", combined_img)
+            cv2.imshow("taxim_" + self.sensor_pad_geom_name, combined_img)
             cv2.waitKey(1)
         if cycle_bg:
             self.change_bg((self.bg_index + 1) % self.bg_len)
@@ -496,7 +496,7 @@ class TaximSensor(object):
                 overlay_vis = (overlay_vis / div_ov * 255).astype(np.uint8)
 
                 combined_img = np.concatenate((sim_img, gt_vis, overlay_vis), axis=1)
-            cv2.imshow("taxim", combined_img)
+            cv2.imshow("taxim_"+self.sensor_pad_geom_name, combined_img)
             cv2.waitKey(1)
 
         # if get_depth:
