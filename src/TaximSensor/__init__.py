@@ -401,7 +401,7 @@ class TaximSensor(object):
 
         return bgr_to_rgb(sim_img)
 
-    def render_taxim(self, model, data, shadow=True, get_depth=True, img_noise_sigma=5, pcn_add_noise=False, visualize=True, cycle_bg=True):
+    def render_taxim(self, model, data, shadow=True, get_depth=True, img_noise_sigma=5, pcn_add_noise=False, visualize=True, cycle_bg=False):
         '''
         Renders the taxim image based on the current mujoco state, and returns the simulated image, ground truth height map, and point cloud.
 
@@ -422,7 +422,7 @@ class TaximSensor(object):
         debug_contact_mask = np.zeros((psp.h, psp.w), dtype=bool)
 
         if len(bodies_in_contact) == 0:
-            sim_img = self.bg_proc.astype(np.float64)
+            sim_img = self.bg_proc.astype(np.float32)
             hm_return = np.zeros((psp.h, psp.w))
             pcn = np.array([])
             gt_height_map = np.zeros((psp.h, psp.w))
@@ -497,7 +497,7 @@ class TaximSensor(object):
 
                 combined_img = np.concatenate((sim_img, gt_vis, overlay_vis), axis=1)
             cv2.imshow("taxim", combined_img)
-            cv2.waitKey(0)
+            cv2.waitKey(1)
 
         # if get_depth:
         #     debug_base = cv2.rotate(debug_base_height, cv2.ROTATE_90_COUNTERCLOCKWISE)
