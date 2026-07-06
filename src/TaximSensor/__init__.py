@@ -33,6 +33,32 @@ _exported_dunders = {
     "__version__",
 }
 
+
+def _depth_map_path_from_normal_map(normal_map_path: str | Path) -> Path:
+    normal_path = Path(normal_map_path)
+    depth_name = normal_path.name.replace("normal", "depth")
+    if depth_name == normal_path.name:
+        depth_name = f"{normal_path.stem}_depth{normal_path.suffix}"
+    return normal_path.with_name(depth_name)
+
+
+def _pseudo_height_from_depth_image(
+    depth_image: np.ndarray,
+    bump_direction: Normals.BUMP_DIRECTION,
+) -> np.ndarray:
+    if depth_image.ndim == 3:
+        depth_image = cv2.cvtColor(depth_image, cv2.COLOR_BGR2GRAY)
+    normalized = depth_image.astype(np.float32)
+    if np.issubdtype(depth_image.dtype, np.integer):
+        normalized /= np.iinfo(depth_image.dtype).max
+    else:
+        max_v = float(np.nanmax(normalized)) if normalized.size else 0.0
+        if max_v > 1.0:
+            normalized /= 255.0
+    if bump_direction == Normals.BUMP_DIRECTION.ZERO_CENTERED:
+        return (normalized * 2.0 - 1.0).astype(np.float32)
+    return normalized.astype(np.float32)
+
 @dataclass
 class Link:
     """
@@ -236,23 +262,31 @@ class TaximSensor(object):
             self.obj_uv_tris[geom_name] = np.asarray(uvs, dtype=np.float32)[faces_i]
             vertex_normals = np.asarray(obj_mesh.vertex_normals, dtype=np.float32)
             self.obj_normal_tris[geom_name] = vertex_normals[faces_i]
-            self.obj_pseudo_height[geom_name] = Normals.approximate_height_map_from_normal_map(
-                normal_map_path,
-                # Blender bakes tangent-space normals in the OpenGL convention.
-                # Flipping the green channel here avoids reconstructing each bump
-                # as a split peak/valley response.
-                invert_y=True,
-                bump_direction=texture_map_direction,
-                normal_map_structure=normal_map_structure,
-            )
-            # normalize and repeat to 3 channels for visualization
-            depth_vis_gray = Normals.pseudo_height_to_uint8_image(
-                self.obj_pseudo_height[geom_name]
-            )
-            depth_vis = np.repeat(depth_vis_gray[:, :, np.newaxis], 3, axis=2)
-            output_path = Path.cwd() / f"{geom_name}_pseudo_height_vis.png"
-            cv2.imwrite(str(output_path), depth_vis)
-            print(f"Saved pseudo-height debug PNG to {output_path}")
+            depth_map_path = _depth_map_path_from_normal_map(normal_map_path)
+            if depth_map_path.exists():
+                cached_depth = cv2.imread(str(depth_map_path), cv2.IMREAD_UNCHANGED)
+                if cached_depth is None:
+                    raise ValueError(f"Could not read cached depth map '{depth_map_path}'.")
+                self.obj_pseudo_height[geom_name] = _pseudo_height_from_depth_image(
+                    cached_depth,
+                    texture_map_direction,
+                )
+                print(f"Loaded cached pseudo-height depth map from {depth_map_path}")
+            else:
+                self.obj_pseudo_height[geom_name] = Normals.approximate_height_map_from_normal_map(
+                    normal_map_path,
+                    # Blender bakes tangent-space normals in the OpenGL convention.
+                    # Flipping the green channel here avoids reconstructing each bump
+                    # as a split peak/valley response.
+                    invert_y=True,
+                    bump_direction=texture_map_direction,
+                    normal_map_structure=normal_map_structure,
+                )
+                depth_vis_gray = Normals.pseudo_height_to_uint8_image(
+                    self.obj_pseudo_height[geom_name]
+                )
+                cv2.imwrite(str(depth_map_path), depth_vis_gray)
+                print(f"Saved pseudo-height depth map to {depth_map_path}")
 
         # self.obj_mesh[geom_name] = self.obj_trimesh[geom_name] if normal_map_path is not None else obj_mesh
         self.obj_mesh[geom_name] = obj_mesh
