@@ -12,7 +12,12 @@ from TaximSensor.Basics.CalibData import CalibData, read_calib_np
 import TaximSensor.Basics.params as pr
 import TaximSensor.Basics.sensorParams as psp
 import TaximSensor.Core as Core
-import norm2tex.normals as Normals
+from norm2tex.normals import (
+    BUMP_DIRECTION,
+    apply_uv_normals,
+    approximate_height_map_from_normal_map,
+    pseudo_height_to_uint8_image,
+)
 from TaximSensor.helpers import (
     _penetration_stats_between_body_and_geom, 
     invert_homogeneous_matrix, 
@@ -44,7 +49,7 @@ def _depth_map_path_from_normal_map(normal_map_path: str | Path) -> Path:
 
 def _pseudo_height_from_depth_image(
     depth_image: np.ndarray,
-    bump_direction: Normals.BUMP_DIRECTION,
+    bump_direction: BUMP_DIRECTION,
 ) -> np.ndarray:
     if depth_image.ndim == 3:
         depth_image = cv2.cvtColor(depth_image, cv2.COLOR_BGR2GRAY)
@@ -55,7 +60,7 @@ def _pseudo_height_from_depth_image(
         max_v = float(np.nanmax(normalized)) if normalized.size else 0.0
         if max_v > 1.0:
             normalized /= 255.0
-    if bump_direction == Normals.BUMP_DIRECTION.ZERO_CENTERED:
+    if bump_direction == BUMP_DIRECTION.ZERO_CENTERED:
         return (normalized * 2.0 - 1.0).astype(np.float32)
     return normalized.astype(np.float32)
 
@@ -199,8 +204,7 @@ class TaximSensor(object):
         data,
         mesh_name: str,
         normal_map_path: str = None,
-        texture_map_direction=Normals.BUMP_DIRECTION.ZERO_CENTERED,
-        normal_map_structure=Normals.NORMAL_MAP_STRUCTURE.STRUCTURED,
+        texture_map_direction=BUMP_DIRECTION.ZERO_CENTERED,
     ):
         """
         Add a mjGEOM to the list of objects to be tracked by the sensor.
@@ -273,16 +277,15 @@ class TaximSensor(object):
                 )
                 print(f"Loaded cached pseudo-height depth map from {depth_map_path}")
             else:
-                self.obj_pseudo_height[geom_name] = Normals.approximate_height_map_from_normal_map(
+                self.obj_pseudo_height[geom_name] = approximate_height_map_from_normal_map(
                     normal_map_path,
                     # Blender bakes tangent-space normals in the OpenGL convention.
                     # Flipping the green channel here avoids reconstructing each bump
                     # as a split peak/valley response.
                     invert_y=True,
                     bump_direction=texture_map_direction,
-                    normal_map_structure=normal_map_structure,
                 )
-                depth_vis_gray = Normals.pseudo_height_to_uint8_image(
+                depth_vis_gray = pseudo_height_to_uint8_image(
                     self.obj_pseudo_height[geom_name]
                 )
                 cv2.imwrite(str(depth_map_path), depth_vis_gray)
@@ -824,7 +827,7 @@ class TaximSensor(object):
         with timed("apply_uv_normals"):
             if hasattr(self, "obj_uvs"):
                 if(obj_name in self.obj_uvs):
-                    heightMap, overlay = Normals.apply_uv_normals(
+                    heightMap, overlay = apply_uv_normals(
                         self.obj_trimesh[obj_name],
                         self.obj_uvs[obj_name],
                         self.obj_pseudo_height[obj_name],
