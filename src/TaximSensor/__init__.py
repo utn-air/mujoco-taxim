@@ -547,7 +547,7 @@ class TaximSensor(object):
                 visualize=visualize,
                 cycle_bg=cycle_bg,
             )
-        print_timings()
+        # print_timings()
         return result
 
     def _render_taxim_impl(
