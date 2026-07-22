@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
+import warnings
 import numpy as np
 from scipy.ndimage import gaussian_filter
 import scipy.ndimage as ndimage
@@ -114,7 +115,7 @@ class TaximSensor(object):
         resize=None,
         preprocess_bg=True,
         texture_bump_scale_mm=0.05,
-        raster_backend="cpu",
+        raster_backend="cuda",
         cuda_device=0,
     ):
         '''
@@ -145,17 +146,28 @@ class TaximSensor(object):
         self.texture_bump_scale_mm = texture_bump_scale_mm
         if raster_backend not in {"cpu", "cuda"}:
             raise ValueError("raster_backend must be either 'cpu' or 'cuda'")
+        self.requested_raster_backend = raster_backend
         self.raster_backend = raster_backend
         self._cuda_raster = None
         if raster_backend == "cuda":
-            from TaximSensor.cuda import CudaRasterBackend
+            from TaximSensor.cuda import CudaRasterBackend, cuda_device_available
 
-            self._cuda_raster = CudaRasterBackend(
-                height=psp.h,
-                width=psp.w,
-                pixmm=psp.pixmm,
-                device=cuda_device,
-            )
+            cuda_available, unavailable_reason = cuda_device_available(cuda_device)
+            if cuda_available:
+                self._cuda_raster = CudaRasterBackend(
+                    height=psp.h,
+                    width=psp.w,
+                    pixmm=psp.pixmm,
+                    device=cuda_device,
+                )
+            else:
+                self.raster_backend = "cpu"
+                warnings.warn(
+                    f"CUDA backend requested but unavailable: {unavailable_reason}. "
+                    "Falling back to the CPU backend.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
         # raw calibration data, here only used for background
         if bg_file is None:

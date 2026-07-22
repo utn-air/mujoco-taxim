@@ -5,10 +5,39 @@ from importlib.resources import files
 from time import perf_counter
 from typing import Any
 
-import cv2
 import numpy as np
 
 from norm2tex.timing import record_timing
+
+
+def cuda_device_available(device: int = 0) -> tuple[bool, str | None]:
+    """Return whether CuPy can create a context for the requested CUDA device."""
+    try:
+        device_index = int(device)
+    except (TypeError, ValueError):
+        return False, f"invalid CUDA device index {device!r}"
+    if device_index < 0:
+        return False, f"invalid CUDA device index {device_index}"
+
+    try:
+        import cupy as cp
+        from cupyx.scipy import ndimage as _cuda_ndimage  # noqa: F401
+    except (ImportError, OSError) as exc:
+        return False, f"CuPy is unavailable ({exc})"
+
+    try:
+        device_count = int(cp.cuda.runtime.getDeviceCount())
+        if device_index >= device_count:
+            return False, (
+                f"CUDA device {device_index} is unavailable "
+                f"({device_count} device(s) detected)"
+            )
+        cuda_device = cp.cuda.Device(device_index)
+        cuda_device.use()
+        _ = cuda_device.compute_capability
+    except Exception as exc:
+        return False, f"CUDA runtime initialization failed ({exc})"
+    return True, None
 
 
 @dataclass
@@ -378,6 +407,8 @@ class CudaRasterBackend:
             )
 
     def _gaussian_blur(self, image: Any, kernel_size: int) -> Any:
+        import cv2
+
         cp = self.cp
         kernel = self._gaussian_kernels.get(kernel_size)
         if kernel is None:

@@ -70,17 +70,20 @@ CUDA 12, the project extra can be used:
 pip install -e '.[cuda12]'
 ```
 
-Select the backend when constructing the sensor:
+CUDA is selected by default. If CuPy, the CUDA runtime, or the selected device
+is unavailable, construction emits a warning and falls back to CPU:
 
 ```python
 sensor = TaximSensor(
     sensor_type="digit",
-    raster_backend="cuda",
     cuda_device=0,
 )
 ```
 
-Use `raster_backend="cpu"` for the reference implementation. CUDA kernels are
+Use `raster_backend="cpu"` to explicitly select the reference implementation
+and skip CUDA probing. The effective selection is available as
+`sensor.raster_backend`, while `sensor.requested_raster_backend` retains the
+constructor choice. CUDA kernels are
 compiled during sensor construction. Static gel, lighting, shadow, and
 background calibration is uploaded once, while object geometry is uploaded by
 `add_geom_mujoco`. Benchmark several warm-up frames before resetting the timing
