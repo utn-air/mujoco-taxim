@@ -197,6 +197,18 @@ class TaximSensor(object):
             assert self.gel_map.max() <= 169.5, "Gelmap max should not exceed 169.5 to stay consistent with original gelmap."
             assert self.gel_map.min() >= 122.0, "Gelmap min should not be less than 122.0 to stay consistent with original gelmap."
         self.gel_map = cv2.GaussianBlur(self.gel_map.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
+        if self._cuda_raster is not None:
+            self._cuda_raster.configure_frame_pipeline(
+                gel_map=self.gel_map,
+                background=self.bg_proc,
+                grad_r=self.calib_data.grad_r,
+                grad_g=self.calib_data.grad_g,
+                grad_b=self.calib_data.grad_b,
+                shadow_directions=self.direction,
+                shadow_table=self.shadowTable,
+                fan_angle=pr.fan_angle,
+                fan_precision=pr.fan_precision,
+            )
 
     def get_current_bg(self):
         '''
@@ -212,6 +224,8 @@ class TaximSensor(object):
         self.bg_proc = self.bgs[bg_index]
         self.bg_proc_rot = self.bgs_rot[bg_index]
         self.bg_index = bg_index
+        if self._cuda_raster is not None:
+            self._cuda_raster.update_background(self.bg_proc)
 
     def add_geom_mujoco(
         self,
@@ -572,16 +586,36 @@ class TaximSensor(object):
             wTo[:3, :3] = wRo
             wTo[:3, 3] = wPo * 1000.0 # change to mm
 
-            with timed("hm_total"):
-                height_map, gel_map, contact_mask, press_depth, gt_height_map, pcn, overlay = self.generateHeightMapWithTransform(wTs, wTo, obj_name, pcn_add_noise=pcn_add_noise)
-                debug_bumpy_height = np.asarray(height_map, dtype=np.float32)
-                debug_contact_mask = np.asarray(contact_mask, dtype=bool)
-                debug_base_height = np.clip(debug_bumpy_height - np.asarray(overlay, dtype=np.float32), 0.0, None)
-            with timed("deform_total"):
-                heightMap, contact_mask, contact_height = Core.deformApprox(press_depth, height_map, gel_map, contact_mask)
-            with timed("sim_total"):
-                sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
-                sim_img = sim_img if not shadow else shadow_sim_img
+            if self._cuda_raster is not None:
+                sTo = invert_homogeneous_matrix(wTs) @ wTo
+                with timed("cuda_pipeline_wall"):
+                    sim_img, gt_height_map, overlay = self._cuda_raster.render_frame(
+                        obj_name,
+                        sTo,
+                        bump_scale_mm=self.texture_bump_scale_mm,
+                        pressing_mm_max=3.0,
+                        contact_scale=pr.contact_scale,
+                        pyramid_kernel_sizes=tuple(pr.pyramid_kernel_size),
+                        final_kernel_size=pr.kernel_size,
+                        shadow=shadow,
+                        shadow_depth_min=self.shadow_depth[0],
+                        height_precision=pr.height_precision,
+                        direction_precision=pr.discritize_precision,
+                        shadow_step=pr.shadow_step,
+                        shadow_sigma=pr.sigma,
+                    )
+                pcn = None
+            else:
+                with timed("hm_total"):
+                    height_map, gel_map, contact_mask, press_depth, gt_height_map, pcn, overlay = self.generateHeightMapWithTransform(wTs, wTo, obj_name, pcn_add_noise=pcn_add_noise)
+                    debug_bumpy_height = np.asarray(height_map, dtype=np.float32)
+                    debug_contact_mask = np.asarray(contact_mask, dtype=bool)
+                    debug_base_height = np.clip(debug_bumpy_height - np.asarray(overlay, dtype=np.float32), 0.0, None)
+                with timed("deform_total"):
+                    heightMap, contact_mask, contact_height = Core.deformApprox(press_depth, height_map, gel_map, contact_mask)
+                with timed("sim_total"):
+                    sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
+                    sim_img = sim_img if not shadow else shadow_sim_img
 
         # add some gaussian noise to simulate real sensor noise
         # noise_sigma = img_noise_sigma

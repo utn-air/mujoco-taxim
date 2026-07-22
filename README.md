@@ -56,12 +56,15 @@ The baked outputs are written as:
 
 These can then be used in the MuJoCo program. See the `eamples/mujoco/normal_map_test.py` for a demonstration.
 
-### CUDA raster backend
+### CUDA backend
 
-The optional CUDA backend accelerates mesh transformation, triangle
-rasterization, UV texture resolution, and displacement merging. Install the
-CuPy package matching the system CUDA toolkit. For CUDA 12, the project extra
-can be used:
+The optional CUDA backend accelerates the complete TAXIM contact-frame path:
+mesh transformation, triangle rasterization, UV texture resolution,
+height-map finalization, soft-body deformation, calibrated illumination, and
+optional shadow casting. Intermediate height, mask, and deformation arrays
+remain on the GPU; only the rendered image and requested depth/debug outputs
+are downloaded. Install the CuPy package matching the system CUDA toolkit. For
+CUDA 12, the project extra can be used:
 
 ```bash
 pip install -e '.[cuda12]'
@@ -78,9 +81,12 @@ sensor = TaximSensor(
 ```
 
 Use `raster_backend="cpu"` for the reference implementation. CUDA kernels are
-compiled during sensor construction and static object data is uploaded by
-`add_geom_mujoco`, so benchmark several warm-up frames before resetting the
-timing counters and collecting results.
+compiled during sensor construction. Static gel, lighting, shadow, and
+background calibration is uploaded once, while object geometry is uploaded by
+`add_geom_mujoco`. Benchmark several warm-up frames before resetting the timing
+counters and collecting results. The timing summary reports `hm_total`,
+`deform_total`, and `sim_total` from CUDA events, `cuda_frame_download` for the
+final transfers, and `cuda_pipeline_wall` for the complete host-visible call.
 
 The indexed geometry counts used by either backend can be inspected after
 object registration:
