@@ -448,7 +448,42 @@ class TaximSensor(object):
 
         return bgr_to_rgb(sim_img)
 
-    def render_taxim(self, model, data, shadow=True, get_depth=True, img_noise_sigma=5, pcn_add_noise=False, visualize=True, cycle_bg=False):
+    def render_taxim(
+        self,
+        model,
+        data,
+        shadow=True,
+        get_depth=True,
+        img_noise_sigma=5,
+        pcn_add_noise=False,
+        visualize=True,
+        cycle_bg=False,
+    ):
+        with timed("taxim_total"):
+            result = self._render_taxim_impl(
+                model=model,
+                data=data,
+                shadow=shadow,
+                get_depth=get_depth,
+                img_noise_sigma=img_noise_sigma,
+                pcn_add_noise=pcn_add_noise,
+                visualize=visualize,
+                cycle_bg=cycle_bg,
+            )
+        print_timings()
+        return result
+
+    def _render_taxim_impl(
+        self,
+        model,
+        data,
+        shadow=True,
+        get_depth=True,
+        img_noise_sigma=5,
+        pcn_add_noise=False,
+        visualize=True,
+        cycle_bg=False,
+    ):
         '''
         Renders the taxim image based on the current mujoco state, and returns the simulated image, ground truth height map, and point cloud.
 
@@ -486,19 +521,17 @@ class TaximSensor(object):
             wTo[:3, :3] = wRo
             wTo[:3, 3] = wPo * 1000.0 # change to mm
 
-            # heightmap: 0.65, deform: 0.025, sim: 0.05
-            with timed("a_hm_gen"):
+            with timed("hm_total"):
                 height_map, gel_map, contact_mask, press_depth, gt_height_map, pcn, overlay = self.generateHeightMapWithTransform(wTs, wTo, obj_name, pcn_add_noise=pcn_add_noise)
                 debug_bumpy_height = np.asarray(height_map, dtype=np.float32)
                 debug_contact_mask = np.asarray(contact_mask, dtype=bool)
                 debug_base_height = np.clip(debug_bumpy_height - np.asarray(overlay, dtype=np.float32), 0.0, None)
-            with timed("b_deform_approx"):
+            with timed("deform_total"):
                 heightMap, contact_mask, contact_height = Core.deformApprox(press_depth, height_map, gel_map, contact_mask)
-            with timed("c_simulating"):
+            with timed("sim_total"):
                 sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
                 sim_img = sim_img if not shadow else shadow_sim_img
-            print_timings()
-        
+
         # add some gaussian noise to simulate real sensor noise
         # noise_sigma = img_noise_sigma
         # noise = np.random.normal(0, noise_sigma, sim_img.shape).astype(sim_img.dtype)
@@ -827,7 +860,7 @@ class TaximSensor(object):
             # The UV pass already produces the undisplaced z-buffer. Reuse it
             # instead of rasterizing the same mesh once in Core and once in
             # norm2tex.
-            with timed("apply_uv_normals"):
+            with timed("hm_texture_total"):
                 heightMap, overlay, zbuf = rasterize_and_apply_uv_normals(
                     self.obj_trimesh[obj_name],
                     self.obj_uvs[obj_name],
