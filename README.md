@@ -56,6 +56,39 @@ The baked outputs are written as:
 
 These can then be used in the MuJoCo program. See the `eamples/mujoco/normal_map_test.py` for a demonstration.
 
+### CUDA raster backend
+
+The optional CUDA backend accelerates mesh transformation, triangle
+rasterization, UV texture resolution, and displacement merging. Install the
+CuPy package matching the system CUDA toolkit. For CUDA 12, the project extra
+can be used:
+
+```bash
+pip install -e '.[cuda12]'
+```
+
+Select the backend when constructing the sensor:
+
+```python
+sensor = TaximSensor(
+    sensor_type="digit",
+    raster_backend="cuda",
+    cuda_device=0,
+)
+```
+
+Use `raster_backend="cpu"` for the reference implementation. CUDA kernels are
+compiled during sensor construction and static object data is uploaded by
+`add_geom_mujoco`, so benchmark several warm-up frames before resetting the
+timing counters and collecting results.
+
+The indexed geometry counts used by either backend can be inspected after
+object registration:
+
+```python
+print(sensor.get_raster_stats("object_geom"))
+```
+
 ## Operating System
 MuJoCo-Taxim has been tested on Ubuntu 22.04. Chances are, the package will work fine in almost any environment so long as it is capable of installing and running MuJoCo 3.
 

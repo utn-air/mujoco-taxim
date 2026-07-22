@@ -33,6 +33,9 @@ dependencies = [
     "numba",
 ]
 
+[project.optional-dependencies]
+cuda12 = ["cupy-cuda12x"]
+
 [project.urls]
 "Homepage" = "https://github.com/Robo-Touch/Taxim"
 "Repository" = "https://github.com/utn-air/mujoco-taxim"
@@ -47,7 +50,7 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.package-data]
-TaximSensor = ["calibs/**/*"]
+TaximSensor = ["calibs/**/*", "cuda/*.cu"]
 
 [tool.setuptools.dynamic]
 version = { attr = "TaximSensor.__version__" }

@@ -1,4 +1,6 @@
 import mujoco
+from dataclasses import dataclass
+
 import numpy as np
 import trimesh
 import cv2
@@ -255,7 +257,22 @@ def build_trimesh_from_mujoco_mesh(model, mesh_id):
     return mesh
 
 
-def build_trimesh_with_uvs_from_mujoco_mesh(model, mesh_id):
+@dataclass(frozen=True)
+class IndexedRasterData:
+    """Compact geometry with face-corner attributes for software rasterization."""
+
+    vertices_h: np.ndarray
+    faces: np.ndarray
+    uv_tris: np.ndarray
+    normal_tris: np.ndarray
+
+
+def build_trimesh_with_uvs_from_mujoco_mesh(
+    model,
+    mesh_id,
+    *,
+    return_raster_data: bool = False,
+):
     """
     Construct a trimesh mesh directly from MuJoCo mesh buffers, preserving the
     same local-frame orientation as `build_trimesh_from_mujoco_mesh` while also
@@ -271,6 +288,9 @@ def build_trimesh_with_uvs_from_mujoco_mesh(model, mesh_id):
         Mesh in the same MuJoCo mesh-local coordinates as `model.mesh_vert`.
     uvs : np.ndarray
         Per-vertex UVs aligned with `mesh.vertices`.
+    raster_data : IndexedRasterData, optional
+        Returned when ``return_raster_data=True``. Geometric vertices remain
+        indexed while UVs and normals are stored per face-corner.
     """
     start_vert = model.mesh_vertadr[mesh_id]
     num_vert = model.mesh_vertnum[mesh_id]
@@ -301,11 +321,31 @@ def build_trimesh_with_uvs_from_mujoco_mesh(model, mesh_id):
         dtype=np.int32,
     )
 
-    # Expand to one vertex per face-corner so UV seams are preserved exactly.
-    expanded_vertices = vertices[faces.reshape(-1)]
-    expanded_uvs = texcoords[face_texcoords.reshape(-1)]
-    expanded_faces = np.arange(len(expanded_vertices), dtype=np.int32).reshape(-1, 3)
+    uv_tris = texcoords[face_texcoords]
+    expanded_uvs = uv_tris.reshape(-1, 2)
+    if return_raster_data:
+        # Taxim consumes UVs and normals from IndexedRasterData, so its
+        # Trimesh can retain the original indexed geometry as well.
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+        vertices_mm = vertices.astype(np.float32) * np.float32(1000.0)
+        vertices_h = np.concatenate(
+            (vertices_mm, np.ones((len(vertices_mm), 1), dtype=np.float32)),
+            axis=1,
+        )
+        face_normals = np.asarray(mesh.face_normals, dtype=np.float32)
+        normal_tris = np.repeat(face_normals[:, None, :], 3, axis=1)
+        raster_data = IndexedRasterData(
+            vertices_h=np.ascontiguousarray(vertices_h),
+            faces=np.ascontiguousarray(faces, dtype=np.int32),
+            uv_tris=np.ascontiguousarray(uv_tris, dtype=np.float32),
+            normal_tris=np.ascontiguousarray(normal_tris, dtype=np.float32),
+        )
+        return mesh, expanded_uvs, raster_data
 
+    # Preserve the original helper behavior for callers that need one UV per
+    # Trimesh vertex rather than the indexed raster representation.
+    expanded_vertices = vertices[faces.reshape(-1)]
+    expanded_faces = np.arange(len(expanded_vertices), dtype=np.int32).reshape(-1, 3)
     visual = trimesh.visual.texture.TextureVisuals(uv=expanded_uvs)
     mesh = trimesh.Trimesh(
         vertices=expanded_vertices,

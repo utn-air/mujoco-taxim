@@ -114,6 +114,8 @@ class TaximSensor(object):
         resize=None,
         preprocess_bg=True,
         texture_bump_scale_mm=0.05,
+        raster_backend="cpu",
+        cuda_device=0,
     ):
         '''
         Initialize the simulator.
@@ -132,6 +134,7 @@ class TaximSensor(object):
         self.obj_mesh = {}
         self.obj_raster_vertices_h = {}
         self.obj_raster_faces = {}
+        self.obj_raster_stats = {}
         self.object_links = {}
         self.object_body_ids = {}
         self.saved=False 
@@ -140,6 +143,19 @@ class TaximSensor(object):
         self.calib_data = CalibData(calib_data)
         self.resize=resize
         self.texture_bump_scale_mm = texture_bump_scale_mm
+        if raster_backend not in {"cpu", "cuda"}:
+            raise ValueError("raster_backend must be either 'cpu' or 'cuda'")
+        self.raster_backend = raster_backend
+        self._cuda_raster = None
+        if raster_backend == "cuda":
+            from TaximSensor.cuda import CudaRasterBackend
+
+            self._cuda_raster = CudaRasterBackend(
+                height=psp.h,
+                width=psp.w,
+                pixmm=psp.pixmm,
+                device=cuda_device,
+            )
 
         # raw calibration data, here only used for background
         if bg_file is None:
@@ -225,6 +241,7 @@ class TaximSensor(object):
         geom_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_GEOM, geom_name)
         obj_type = mj.mjtObj.mjOBJ_GEOM
         uvs = None
+        raster_data = None
 
         assert geom_id >= 0, f"Geometry {geom_name} not found in model."
         # Keep track of body id for contact checking
@@ -242,22 +259,35 @@ class TaximSensor(object):
             mesh_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_MESH, mesh_name)
             assert mesh_id >= 0, f"Mesh {mesh_name} not found in model."
             try:
-                obj_mesh, uvs = build_trimesh_with_uvs_from_mujoco_mesh(model, mesh_id)
+                obj_mesh, uvs, raster_data = build_trimesh_with_uvs_from_mujoco_mesh(
+                    model,
+                    mesh_id,
+                    return_raster_data=True,
+                )
             except ValueError:
                 print(f"WARNING: Mesh {mesh_name} does not contain UVs. Falling back to non-UV mesh.")
                 obj_mesh = build_trimesh_from_mujoco_mesh(model, mesh_id)
         else:
             obj_mesh = build_trimesh_from_mujoco_primitive(model, geom_id, geom_type)
 
-        vertices_mm = np.asarray(obj_mesh.vertices, dtype=np.float32) * np.float32(1000.0)
-        self.obj_raster_vertices_h[geom_name] = np.concatenate(
-            (vertices_mm, np.ones((len(vertices_mm), 1), dtype=np.float32)),
-            axis=1,
-        )
-        self.obj_raster_faces[geom_name] = obj_mesh.faces.astype(
-            np.int32,
-            copy=False,
-        )
+        if raster_data is None:
+            vertices_mm = np.asarray(obj_mesh.vertices, dtype=np.float32) * np.float32(1000.0)
+            self.obj_raster_vertices_h[geom_name] = np.concatenate(
+                (vertices_mm, np.ones((len(vertices_mm), 1), dtype=np.float32)),
+                axis=1,
+            )
+            self.obj_raster_faces[geom_name] = obj_mesh.faces.astype(
+                np.int32,
+                copy=False,
+            )
+        else:
+            self.obj_raster_vertices_h[geom_name] = raster_data.vertices_h
+            self.obj_raster_faces[geom_name] = raster_data.faces
+        self.obj_raster_stats[geom_name] = {
+            "vertices": len(self.obj_raster_vertices_h[geom_name]),
+            "faces": len(self.obj_raster_faces[geom_name]),
+            "face_corners": len(uvs) if uvs is not None else len(obj_mesh.vertices),
+        }
         if normal_map_path is not None and uvs is not None:
             # Load all the normal map related data at add
             if not hasattr(self, "obj_uvs"):
@@ -272,10 +302,14 @@ class TaximSensor(object):
                 self.obj_normal_tris = {}
             self.obj_trimesh[geom_name] = obj_mesh 
             self.obj_uvs[geom_name] = uvs
-            faces_i = self.obj_raster_faces[geom_name]
-            self.obj_uv_tris[geom_name] = np.asarray(uvs, dtype=np.float32)[faces_i]
-            vertex_normals = np.asarray(obj_mesh.vertex_normals, dtype=np.float32)
-            self.obj_normal_tris[geom_name] = vertex_normals[faces_i]
+            if raster_data is None:
+                faces_i = self.obj_raster_faces[geom_name]
+                self.obj_uv_tris[geom_name] = np.asarray(uvs, dtype=np.float32)[faces_i]
+                vertex_normals = np.asarray(obj_mesh.vertex_normals, dtype=np.float32)
+                self.obj_normal_tris[geom_name] = vertex_normals[faces_i]
+            else:
+                self.obj_uv_tris[geom_name] = raster_data.uv_tris
+                self.obj_normal_tris[geom_name] = raster_data.normal_tris
             depth_map_path = _depth_map_path_from_normal_map(normal_map_path)
             if depth_map_path.exists():
                 cached_depth = cv2.imread(str(depth_map_path), cv2.IMREAD_UNCHANGED)
@@ -303,6 +337,23 @@ class TaximSensor(object):
 
         # self.obj_mesh[geom_name] = self.obj_trimesh[geom_name] if normal_map_path is not None else obj_mesh
         self.obj_mesh[geom_name] = obj_mesh
+        if self._cuda_raster is not None:
+            textured = hasattr(self, "obj_pseudo_height") and geom_name in self.obj_pseudo_height
+            self._cuda_raster.register_object(
+                geom_name,
+                self.obj_raster_vertices_h[geom_name],
+                self.obj_raster_faces[geom_name],
+                uv_tris=self.obj_uv_tris[geom_name] if textured else None,
+                normal_tris=self.obj_normal_tris[geom_name] if textured else None,
+                pseudo_height=self.obj_pseudo_height[geom_name] if textured else None,
+            )
+
+    def get_raster_stats(self, obj_name: str) -> dict[str, int]:
+        """Return geometry counts used by the CPU or CUDA raster backend."""
+        try:
+            return dict(self.obj_raster_stats[obj_name])
+        except KeyError as exc:
+            raise KeyError(f"Raster object {obj_name!r} has not been registered") from exc
 
     def add_camera_mujoco(self, sensor_name, model, data):
         """
@@ -856,7 +907,15 @@ class TaximSensor(object):
         vertices_h = self.obj_raster_vertices_h[obj_name]
         faces = self.obj_raster_faces[obj_name]
 
-        if has_uv_texture:
+        if self._cuda_raster is not None:
+            timing_label = "hm_texture_total" if has_uv_texture else "hm_raster_total"
+            with timed(timing_label):
+                heightMap, overlay, zbuf = self._cuda_raster.rasterize(
+                    obj_name,
+                    sTo,
+                    bump_scale_mm=self.texture_bump_scale_mm,
+                )
+        elif has_uv_texture:
             # The UV pass already produces the undisplaced z-buffer. Reuse it
             # instead of rasterizing the same mesh once in Core and once in
             # norm2tex.
