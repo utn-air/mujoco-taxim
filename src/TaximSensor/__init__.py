@@ -14,9 +14,9 @@ import TaximSensor.Basics.sensorParams as psp
 import TaximSensor.Core as Core
 from norm2tex.normals import (
     BUMP_DIRECTION,
-    apply_uv_normals,
     approximate_height_map_from_normal_map,
     pseudo_height_to_uint8_image,
+    rasterize_and_apply_uv_normals,
 )
 from TaximSensor.helpers import (
     _penetration_stats_between_body_and_geom, 
@@ -114,7 +114,6 @@ class TaximSensor(object):
         resize=None,
         preprocess_bg=True,
         texture_bump_scale_mm=0.05,
-        texture_uv_supersample=1,
     ):
         '''
         Initialize the simulator.
@@ -131,6 +130,8 @@ class TaximSensor(object):
 
         self.sensor_type = sensor_type
         self.obj_mesh = {}
+        self.obj_raster_vertices_h = {}
+        self.obj_raster_faces = {}
         self.object_links = {}
         self.object_body_ids = {}
         self.saved=False 
@@ -139,7 +140,6 @@ class TaximSensor(object):
         self.calib_data = CalibData(calib_data)
         self.resize=resize
         self.texture_bump_scale_mm = texture_bump_scale_mm
-        self.texture_uv_supersample = max(1, int(texture_uv_supersample))
 
         # raw calibration data, here only used for background
         if bg_file is None:
@@ -248,6 +248,16 @@ class TaximSensor(object):
                 obj_mesh = build_trimesh_from_mujoco_mesh(model, mesh_id)
         else:
             obj_mesh = build_trimesh_from_mujoco_primitive(model, geom_id, geom_type)
+
+        vertices_mm = np.asarray(obj_mesh.vertices, dtype=np.float32) * np.float32(1000.0)
+        self.obj_raster_vertices_h[geom_name] = np.concatenate(
+            (vertices_mm, np.ones((len(vertices_mm), 1), dtype=np.float32)),
+            axis=1,
+        )
+        self.obj_raster_faces[geom_name] = obj_mesh.faces.astype(
+            np.int32,
+            copy=False,
+        )
         if normal_map_path is not None and uvs is not None:
             # Load all the normal map related data at add
             if not hasattr(self, "obj_uvs"):
@@ -262,7 +272,7 @@ class TaximSensor(object):
                 self.obj_normal_tris = {}
             self.obj_trimesh[geom_name] = obj_mesh 
             self.obj_uvs[geom_name] = uvs
-            faces_i = obj_mesh.faces.astype(np.int32, copy=False)
+            faces_i = self.obj_raster_faces[geom_name]
             self.obj_uv_tris[geom_name] = np.asarray(uvs, dtype=np.float32)[faces_i]
             vertex_normals = np.asarray(obj_mesh.vertex_normals, dtype=np.float32)
             self.obj_normal_tris[geom_name] = vertex_normals[faces_i]
@@ -424,7 +434,7 @@ class TaximSensor(object):
         return bgr_to_rgb(sim_img), hm_return, pcn
     
     def render_blank_taxim(self, shadow=True):
-        gel_map = self.gel_map.copy()
+        gel_map = self.gel_map
         height_map = np.zeros((psp.h, psp.w))
         press_depth = 0.0
         contact_mask = height_map > gel_map
@@ -487,7 +497,7 @@ class TaximSensor(object):
             with timed("c_simulating"):
                 sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
                 sim_img = sim_img if not shadow else shadow_sim_img
-            # print_timings()
+            print_timings()
         
         # add some gaussian noise to simulate real sensor noise
         # noise_sigma = img_noise_sigma
@@ -803,47 +813,50 @@ class TaximSensor(object):
         contact_mask: indicate contact area
         """
         # load dome-shape gelpad model
-        gel_map = self.gel_map.copy()
-        heightMap = np.zeros((psp.h,psp.w))
+        gel_map = self.gel_map
 
         # calculate sTo: object-in-sensor-frame transform
         sTw = invert_homogeneous_matrix(wTs)
         sTo = sTw @ wTo
 
-        # Rasterization method takes ~3x more time than the original pointcloud method
-        # With bbox culling, 2x speedup
-        # with njit, 10x faster than original pc approach
-        
-        # Rasterize the depth of the object in sensor frame
-        zbuf = Core.rasterize_depth_from_trimesh(
-            self.obj_mesh[obj_name],
-            sTo,
-            psp.h,
-            psp.w,
-            psp.pixmm,
-        )
-        heightMap = Core.heightmap_from_zbuf(zbuf, psp.pixmm)
-        overlay = np.zeros_like(heightMap)
-        with timed("apply_uv_normals"):
-            if hasattr(self, "obj_uvs"):
-                if(obj_name in self.obj_uvs):
-                    heightMap, overlay = apply_uv_normals(
-                        self.obj_trimesh[obj_name],
-                        self.obj_uvs[obj_name],
-                        self.obj_pseudo_height[obj_name],
-                        heightMap,
-                        sTo,
-                        psp.pixmm,
-                        bump_scale_mm=self.texture_bump_scale_mm,
-                        supersample=self.texture_uv_supersample,
-                        uv_tris_cache=self.obj_uv_tris[obj_name],
-                        normal_tris_cache=self.obj_normal_tris[obj_name],
-                    )
+        has_uv_texture = hasattr(self, "obj_uvs") and obj_name in self.obj_uvs
+        vertices_h = self.obj_raster_vertices_h[obj_name]
+        faces = self.obj_raster_faces[obj_name]
+
+        if has_uv_texture:
+            # The UV pass already produces the undisplaced z-buffer. Reuse it
+            # instead of rasterizing the same mesh once in Core and once in
+            # norm2tex.
+            with timed("apply_uv_normals"):
+                heightMap, overlay, zbuf = rasterize_and_apply_uv_normals(
+                    self.obj_trimesh[obj_name],
+                    self.obj_uvs[obj_name],
+                    self.obj_pseudo_height[obj_name],
+                    sTo,
+                    (psp.h, psp.w),
+                    psp.pixmm,
+                    bump_scale_mm=self.texture_bump_scale_mm,
+                    uv_tris_cache=self.obj_uv_tris[obj_name],
+                    normal_tris_cache=self.obj_normal_tris[obj_name],
+                    vertices_h_cache=vertices_h,
+                    faces_cache=faces,
+                )
+        else:
+            zbuf = Core.rasterize_depth_from_trimesh(
+                self.obj_mesh[obj_name],
+                sTo,
+                psp.h,
+                psp.w,
+                psp.pixmm,
+                vertices_h_cache=vertices_h,
+                faces_cache=faces,
+            )
+            heightMap = Core.heightmap_from_zbuf(zbuf, psp.pixmm)
+            overlay = np.zeros_like(heightMap)
         
         n_points = 5000
         pcn = None
         if return_pcn:
-            print("pcn")
             pcn = Core.pointcloud_from_zbuf_with_normals(zbuf, psp.pixmm, n_points=n_points, roughness_enable=pcn_add_noise)
         
         # assert pcn.shape[0] == n_points, "Pointcloud does not have the expected number of points."
@@ -857,20 +870,20 @@ class TaximSensor(object):
             pressing_height_mm = 0.0
             
         pressing_height_pix = pressing_height_mm/psp.pixmm
-        max_g = np.max(gel_map)
-        min_g = np.min(gel_map)
-        max_o = np.max(heightMap)
+        max_g = float(gel_map.max())
+        max_o = float(heightMap.max())
         # shift the gelpad to interact with the object
         gel_map = -1 * gel_map + (max_g+max_o-pressing_height_pix)
 
         # get the contact area 
         contact_mask = heightMap > gel_map # heightMap > gel_map
         # combine contact area of object shape with non contact area of gelpad shape
-        zq = np.zeros((psp.h,psp.w))
-
-        zq[contact_mask]  = heightMap[contact_mask]
-        zq[~contact_mask] = gel_map[~contact_mask]
-        heightMapBlur = cv2.GaussianBlur(heightMap.astype(np.float32)/heightMap.max(),(5,5),0)
+        zq = np.where(contact_mask, heightMap, gel_map)
+        heightMapBlur = cv2.GaussianBlur(
+            heightMap.astype(np.float32) / max(max_o, 1e-8),
+            (5, 5),
+            0,
+        )
 
         return zq, gel_map, contact_mask, pressing_height_mm, heightMapBlur, pcn, overlay
     

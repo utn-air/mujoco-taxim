@@ -133,38 +133,43 @@ def rasterize_depth_from_trimesh(
     H: int,
     W: int,
     pixmm: float,
+    vertices_h_cache: np.ndarray | None = None,
+    faces_cache: np.ndarray | None = None,
 ) -> np.ndarray:
     """
-    Returns zbuf (H,W) storing minimum z in *sensor frame* for each pixel.
-    z is in the same units as mesh coordinates (typically meters or mm).
+    Returns zbuf (H,W) storing the largest negative z in the sensor frame for
+    each pixel. Mesh vertices are converted from metres to millimetres before
+    applying ``sTo``, so finite z-buffer values are in millimetres.
     """
     # --- Transform mesh vertices into sensor frame ---
 
-    V = (mesh.vertices.astype(np.float32) * 1000)      # (V,3)
-    F = mesh.faces.astype(np.int32)                    # (F,3)
+    if vertices_h_cache is None:
+        vertices_mm = np.asarray(mesh.vertices, dtype=np.float32) * np.float32(1000.0)
+        vertices_h = np.concatenate(
+            (vertices_mm, np.ones((len(vertices_mm), 1), dtype=np.float32)),
+            axis=1,
+        )
+    else:
+        vertices_h = np.asarray(vertices_h_cache, dtype=np.float32)
+    if faces_cache is None:
+        faces = mesh.faces.astype(np.int32, copy=False)
+    else:
+        faces = np.asarray(faces_cache, dtype=np.int32)
 
-    Vh = np.c_[V, np.ones((len(V), 1), dtype=np.float32)]
-    Vs = (sTo @ Vh.T).T[:, :3]                         # (V,3) in sensor frame
+    sTo32 = np.asarray(sTo, dtype=np.float32)
+    vertices_sensor = (sTo32 @ vertices_h.T).T[:, :3]
 
     # Gather triangles in sensor frame: (F,3,3)
-    tris = Vs[F]
+    tris = vertices_sensor[faces]
 
     # --- Project triangle vertices to pixel coords (float) ---
     us = tris[..., 0] / pixmm + (W * 0.5)
     vs = tris[..., 1] / pixmm + (H * 0.5)
-    zs = tris[..., 2].astype(np.float32)
+    zs = tris[..., 2].astype(np.float32, copy=False)
 
-    # --- Cull irrelevant triangles ---
-    u_min = np.min(us, axis=1); u_max = np.max(us, axis=1)
-    v_min = np.min(vs, axis=1); v_max = np.max(vs, axis=1)
-
-    in_img = (u_max >= 0) & (u_min < psp.w) & (v_max >= 0) & (v_min < psp.h)
-    penetrates = np.min(zs, axis=1) < 0.0  # at least one vertex below gel plane
-
-    keep = in_img & penetrates
-    us_k = us[keep]; vs_k = vs[keep]; zs_k = zs[keep]
-    us = us_k; vs = vs_k; zs = zs_k
-
+    # zbuf_rasterize_numba performs image and gel-plane culling while walking
+    # the triangles, so precomputing min/max masks and copied subsets here only
+    # duplicates work and adds per-frame allocations.
     zbuf = zbuf_rasterize_numba(us, vs, zs, H, W)
     
     return zbuf
