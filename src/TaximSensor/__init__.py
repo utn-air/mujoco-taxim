@@ -138,6 +138,7 @@ class TaximSensor(object):
         self.obj_raster_stats = {}
         self.object_links = {}
         self.object_body_ids = {}
+        self._background_rng = np.random.default_rng()
         # Blank renders are static for a given calibrated background.  Keep
         # the final RGB output keyed by background index and shadow setting so
         # switching backgrounds selects the matching cached reference image.
@@ -242,6 +243,19 @@ class TaximSensor(object):
         self.bg_index = bg_index
         if self._cuda_raster is not None:
             self._cuda_raster.update_background(self.bg_proc)
+
+    def randomize_bg(self) -> None:
+        """Select a random calibration background, avoiding the current one.
+
+        With more than one available background, every randomization changes
+        the active image while remaining uniform across the other choices.
+        """
+        if self.bg_len < 2:
+            return
+        sampled_index = int(self._background_rng.integers(self.bg_len - 1))
+        if sampled_index >= self.bg_index:
+            sampled_index += 1
+        self.change_bg(sampled_index)
 
     def add_geom_mujoco(
         self,
@@ -510,7 +524,7 @@ class TaximSensor(object):
             cv2.imshow("taxim_" + self.sensor_pad_geom_name, combined_img)
             cv2.waitKey(1)
         if cycle_bg:
-            self.change_bg((self.bg_index + 1) % self.bg_len)
+            self.randomize_bg()
         # for gelsight OFR, bgr_to_rgb(sim_img); for Digit, not needed for some reason 
         return bgr_to_rgb(sim_img), hm_return, pcn
     
@@ -724,7 +738,7 @@ class TaximSensor(object):
             #     cv2.imwrite(f"{uuid}_debug_contact_mask.png", debug_mask)
 
         if cycle_bg:
-            self.change_bg((self.bg_index + 1) % self.bg_len)
+            self.randomize_bg()
         return bgr_to_rgb(sim_img), hm_return, pcn
         
     def processInitialFrame(self):
