@@ -138,6 +138,10 @@ class TaximSensor(object):
         self.obj_raster_stats = {}
         self.object_links = {}
         self.object_body_ids = {}
+        # Blank renders are static for a given calibrated background.  Keep
+        # the final RGB output keyed by background index and shadow setting so
+        # switching backgrounds selects the matching cached reference image.
+        self._blank_taxim_cache: dict[tuple[int, bool], np.ndarray] = {}
         self.saved=False 
         # polytable
         calib_data = f"{sensor_type}/polycalib.npz"
@@ -511,6 +515,19 @@ class TaximSensor(object):
         return bgr_to_rgb(sim_img), hm_return, pcn
     
     def render_blank_taxim(self, shadow=True):
+        """Render or retrieve the static no-contact image for the active background.
+
+        The result only changes when ``bg_index`` or ``shadow`` changes; it
+        does not depend on the current MuJoCo state.  Cache the post-rotation,
+        post-resize RGB image so repeated requests avoid the rendering path.
+        A copy is returned to keep callers from mutating the cached reference.
+        """
+        print(self.bg_index)
+        cache_key = (self.bg_index, bool(shadow))
+        cached_image = self._blank_taxim_cache.get(cache_key)
+        if cached_image is not None:
+            return cached_image.copy()
+
         gel_map = self.gel_map
         height_map = np.zeros((psp.h, psp.w))
         press_depth = 0.0
@@ -523,7 +540,9 @@ class TaximSensor(object):
         sim_img  = cv2.rotate(np.clip(np.rint(sim_img), 0, 255).astype(np.uint8), cv2.ROTATE_90_COUNTERCLOCKWISE)
         sim_img = cv2.resize(sim_img, self.resize) if self.resize is not None else sim_img
 
-        return bgr_to_rgb(sim_img)
+        rendered_image = bgr_to_rgb(sim_img)
+        self._blank_taxim_cache[cache_key] = rendered_image
+        return rendered_image.copy()
 
     def render_taxim(
         self,
