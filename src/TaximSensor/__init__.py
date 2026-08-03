@@ -536,7 +536,6 @@ class TaximSensor(object):
         post-resize RGB image so repeated requests avoid the rendering path.
         A copy is returned to keep callers from mutating the cached reference.
         """
-        print(self.bg_index)
         cache_key = (self.bg_index, bool(shadow))
         cached_image = self._blank_taxim_cache.get(cache_key)
         if cached_image is not None:
