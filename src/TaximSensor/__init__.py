@@ -637,7 +637,7 @@ class TaximSensor(object):
                         obj_name,
                         sTo,
                         bump_scale_mm=self.texture_bump_scale_mm,
-                        pressing_mm_max=3.0,
+                        pressing_mm_max=1.2,
                         contact_scale=pr.contact_scale,
                         pyramid_kernel_sizes=tuple(pr.pyramid_kernel_size),
                         final_kernel_size=pr.kernel_size,
@@ -963,7 +963,7 @@ class TaximSensor(object):
         shadow_sim_img = cv2.GaussianBlur(shadow_sim_img.astype(np.float32), (pr.kernel_size, pr.kernel_size), 0)
         return sim_img, shadow_sim_img
 
-    def generateHeightMapWithTransform(self, wTs, wTo, obj_name, pressing_mm_max = 3.0, return_pcn=False, pcn_add_noise=False):
+    def generateHeightMapWithTransform(self, wTs, wTo, obj_name, pressing_mm_max = 1.2, return_pcn=False, pcn_add_noise=False):
         """
         Generate the height map by interacting the object with the gelpad model.
 
