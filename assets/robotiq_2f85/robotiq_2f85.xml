@@ -15,7 +15,9 @@
     <mesh name="coupler" file="coupler.stl"/>
     <mesh name="spring_link" file="spring_link.stl"/>
     <mesh name="follower" file="follower.stl"/>
-    <mesh name="tongue" file="digit_adapter.stl"/>
+    <!-- <mesh name="tongue" file="digit_adapter.stl"/> -->
+    <mesh name="tongue" file="digit_finger_decimated.stl"/>
+    <mesh name="tongue_base" file="digit_finger_holder.stl"/>
     <mesh name="digit_pad" file="digit_pad.stl"/>
     <mesh name="digit_body" file="digit_body.stl"/>
   </asset>
@@ -94,13 +96,14 @@
             diaginertia="2.67415e-06 2.4559e-06 6.02031e-07"/>
           <joint name="left_follower_joint" class="follower"/>
           <geom class="visual" pos="0.0509079 -0.10392 -0.0091" quat="1 -1 0 0" type="mesh"  mesh="follower"/>
-          <geom class="visual" pos="0.0509079 -0.10392 -0.0091" quat="1 -1 0 0" type="mesh" material="metal" mesh="tongue"/>
-          <body name="left_digit" euler="-1.571 0 0" pos="-0.0074 0.028 -0.00905">
+          <geom class="visual" pos="0.0509079 -0.10392 -0.0091" quat="1 -1 0 0" type="mesh" material="metal" mesh="tongue_base"/>
+          <geom class="visual" pos="0.0509079 -0.10392 -0.0091" quat="1 -1 0 0" type="mesh" mesh="tongue"/>
+          <body name="left_digit" euler="-1.571 0 0" pos="-0.0074 0.032 -0.00905">
             <site name="left_digit_pad" pos="0.02 0 0.016" euler="3.142 1.571 0"/>
             <geom class="visual" pos="0 0 0" quat="1 0 0 0" rgba="0.9 0.9 0.9 1" type="mesh"  mesh="digit_pad"/>
             <geom class="collision" name="left_digit_pad" pos="0 0 0" quat="1 0 0 0" type="mesh"  mesh="digit_pad"/>
             <geom class="visual" pos="0 0 0" quat="1 0 0 0" rgba="0.149 0.149 0.149 1" type="mesh"  mesh="digit_body"/>
-            <geom class="collision" pos="0 0 0" quat="1 0 0 0" type="mesh"  mesh="digit_body"/>
+            <!-- <geom class="collision" pos="0 0 0" quat="1 0 0 0" type="mesh"  mesh="digit_body"/> -->
           </body>
           <geom class="collision" pos="0.0509079 -0.10392 -0.0091" quat="1 -1 0 0" type="mesh"  mesh="follower"/>
           <geom class="collision" pos="0.0509079 -0.10392 -0.0091" quat="1 -1 0 0" type="mesh"  mesh="tongue"/>
@@ -138,15 +141,16 @@
             quat="0.359439 0.359439 0.608937 0.608937"
             diaginertia="2.67415e-06 2.4559e-06 6.02031e-07"/>
           <joint name="right_follower_joint" class="follower"/>
-          <geom class="visual" pos="0.0509079 -0.10392 -0.0091" quat="1 -1 0 0"  material="metal" mesh="tongue"/>
+          <geom class="visual" pos="0.0509079 -0.10392 -0.0091" quat="1 -1 0 0"  material="metal" mesh="tongue_base"/>
+          <geom class="visual" pos="0.0509079 -0.10392 -0.0091" quat="1 -1 0 0"  mesh="tongue"/>
           <geom class="visual" pos="0.0509079 -0.10392 -0.0091" quat="1 -1 0 0"   mesh="follower"/>
           <geom class="collision" pos="0.0509079 -0.10392 -0.0091" quat="1 -1 0 0"   mesh="tongue"/>
-          <body name="right_digit" euler="-1.571 0 0" pos="-0.0074 0.028 -0.00905">
+          <body name="right_digit" euler="-1.571 0 0" pos="-0.0074 0.032 -0.00905">
             <site name="right_digit_pad" pos="0.02 0 0.016" euler="3.142 1.571 0"/>
             <geom class="visual" pos="0 0 0" quat="1 0 0 0" rgba="0.9 0.9 0.9 1" type="mesh"  mesh="digit_pad"/>
             <geom class="collision" name="right_digit_pad" pos="0 0 0" quat="1 0 0 0" type="mesh"  mesh="digit_pad"/>
             <geom class="visual" pos="0 0 0" quat="1 0 0 0" rgba="0.149 0.149 0.149 1" type="mesh"  mesh="digit_body"/>
-            <geom class="collision" pos="0 0 0" quat="1 0 0 0" type="mesh"  mesh="digit_body"/>
+            <!-- <geom class="collision" pos="0 0 0" quat="1 0 0 0" type="mesh"  mesh="digit_body"/> -->
           </body>
           <geom class="collision" pos="0.0509079 -0.10392 -0.0091" quat="1 -1 0 0"   mesh="follower"/>
           <body name="right_pad" pos="-0.0377897 -0.103916 -0.0091"   quat="1 -1 0 0" >
