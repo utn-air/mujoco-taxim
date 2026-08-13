@@ -7,4 +7,7 @@ dist/
 *_normal.png
 *_uv.obj
 *_uv.mtl
+!examples/mujoco/normal_xml/assets/target_objs/box_Wood_woodtest_color.png
+!examples/mujoco/normal_xml/assets/target_objs/box_Wood_woodtest_normal.png
+!examples/mujoco/normal_xml/assets/target_objs/box_Wood_woodtest_uv.obj
 recordings/

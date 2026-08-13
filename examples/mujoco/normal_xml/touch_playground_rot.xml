@@ -36,7 +36,9 @@
         <!-- For primitives, tacto_common.xml does not affect the loaded mesh. -->
         <!-- These lines are identical except for their respective pos and euler so that the objects are aligned properly. -->
         
-        <geom name="can_geom" type="mesh" mesh="can_mesh" material="can_material" pos="0 0 -0.00" euler="0 0 0" friction="0.4" /> 
+        <!-- The Wood mesh is a 50 mm cube. Offset its center so its near face
+             starts just above the sensor and reaches contact on frame 1. -->
+        <geom name="can_geom" type="mesh" mesh="can_mesh" material="can_material" pos="0 0 0.02034" euler="0 0 0" friction="0.4" />
         
         <inertial pos="0 0 0" mass="1" diaginertia="1 1 1" />
         <joint name="zz" type="slide" axis="1 0 0" damping="0.1" range="-0.01 0.01"/>

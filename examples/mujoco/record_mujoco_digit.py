@@ -27,7 +27,7 @@ NORM2TEX_NORMAL_MAP = (
     / "normal_xml"
     / "assets"
     / "target_objs"
-    / "golf_small_Fabric_normal.png"
+    / "box_Wood_woodtest_normal.png"
 )
 
 # 0.1 mm = 0.0001 m.  Thirty steps therefore reach exactly 3 mm.
@@ -35,6 +35,8 @@ DEPTH_INCREMENT_M = 0.0001
 MAX_DEPTH_M = 0.003
 FRAME_COUNT = 30
 DEFAULT_FPS = 30
+DEFAULT_FLAT_CONTACT_CURVATURE_MM = 0.5
+DEFAULT_FLAT_CONTACT_SLOPE_THRESHOLD = 0.01
 
 
 def parse_args():
@@ -63,8 +65,26 @@ def parse_args():
         "--norm2tex",
         action="store_true",
         help=(
-            "Render the UV-mapped golf ball with its Fabric normal-map texture "
+            "Render the UV-mapped box with its Wood normal-map texture "
             "instead of the default untextured object."
+        ),
+    )
+    parser.add_argument(
+        "--flat-contact-curvature-mm",
+        type=float,
+        default=DEFAULT_FLAT_CONTACT_CURVATURE_MM,
+        help=(
+            "Maximum spherical-cap height added to flat contacts in mm; "
+            f"use 0 to disable (default: {DEFAULT_FLAT_CONTACT_CURVATURE_MM})."
+        ),
+    )
+    parser.add_argument(
+        "--flat-contact-slope-threshold",
+        type=float,
+        default=DEFAULT_FLAT_CONTACT_SLOPE_THRESHOLD,
+        help=(
+            "Maximum underlying surface slope treated as flat "
+            f"(default: {DEFAULT_FLAT_CONTACT_SLOPE_THRESHOLD})."
         ),
     )
     return parser.parse_args()
@@ -102,6 +122,10 @@ def main():
     args = parse_args()
     if args.fps <= 0:
         raise ValueError("--fps must be greater than zero")
+    if args.flat_contact_curvature_mm < 0.0:
+        raise ValueError("--flat-contact-curvature-mm must be non-negative")
+    if args.flat_contact_slope_threshold <= 0.0:
+        raise ValueError("--flat-contact-slope-threshold must be greater than zero")
     if not math.isclose(
         FRAME_COUNT * DEPTH_INCREMENT_M, MAX_DEPTH_M, rel_tol=0.0, abs_tol=1e-12
     ):
@@ -126,7 +150,9 @@ def main():
         resize=None,
         gelmap_file="/home/sbien/Documents/Development/V2T/TactoSampler/taxim_files/gelmap_alt.npy",
         preprocess_bg=True,
-        texture_bump_scale_mm=0.2 if args.norm2tex else 0.05,
+        texture_bump_scale_mm=0.5 if args.norm2tex else 0.05,
+        flat_contact_curvature_mm=args.flat_contact_curvature_mm,
+        flat_contact_slope_threshold=args.flat_contact_slope_threshold,
         raster_backend=args.raster_backend,
     )
     geom_options = {}
@@ -141,7 +167,8 @@ def main():
     sensor.add_camera_mujoco("left_tacto_pad", model, data)
     sensor.set_sensor_pad_geom("finger_1_left_0")
 
-    vertical_qpos = model.joint("xx").qposadr
+    vertical_joint_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_JOINT, "xx")
+    vertical_qpos = int(model.jnt_qposadr[vertical_joint_id])
     initial_height = float(data.qpos[vertical_qpos])
 
     for frame_number in range(1, FRAME_COUNT + 1):

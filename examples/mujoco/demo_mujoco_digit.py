@@ -90,7 +90,7 @@ def main():
     # bg_index specifies which background image to use in the provided/default npz file.
     # Resize does what it says, in the format (new_h, new_w); output image will be scaled to this.
     # preprocess_bg applies a gaussian blur to the background image.
-    sim = TaximSensor(sensor_type="digit", bg_file=None, bg_index=0, resize=None, preprocess_bg=True)
+    sim = TaximSensor(sensor_type="digit", gelmap_file="/home/sbien/Documents/Development/V2T/TactoSampler/taxim_files/gelmap_alt.npy", bg_file=None, bg_index=0, resize=None, preprocess_bg=True)
 
     # For the sensor to work, the desired object in mujoco needs to be added.
     sim.add_geom_mujoco("can_geom", model=model, data=data, mesh_name="can_mesh")
