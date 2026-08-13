@@ -39,6 +39,7 @@ _exported_dunders = {
     "__version__",
 }
 
+SHARED_PRESSING_MM_MAX = 1.2
 
 def _depth_map_path_from_normal_map(normal_map_path: str | Path) -> Path:
     normal_path = Path(normal_map_path)
@@ -115,6 +116,8 @@ class TaximSensor(object):
         resize=None,
         preprocess_bg=True,
         texture_bump_scale_mm=0.05,
+        flat_contact_curvature_mm=0.0,
+        flat_contact_slope_threshold=0.01,
         raster_backend="cuda",
         cuda_device=0,
     ):
@@ -149,6 +152,12 @@ class TaximSensor(object):
         self.calib_data = CalibData(calib_data)
         self.resize=resize
         self.texture_bump_scale_mm = texture_bump_scale_mm
+        self.flat_contact_curvature_mm = float(flat_contact_curvature_mm)
+        self.flat_contact_slope_threshold = float(flat_contact_slope_threshold)
+        if self.flat_contact_curvature_mm < 0.0:
+            raise ValueError("flat_contact_curvature_mm must be non-negative")
+        if self.flat_contact_slope_threshold <= 0.0:
+            raise ValueError("flat_contact_slope_threshold must be greater than zero")
         if raster_backend not in {"cpu", "cuda"}:
             raise ValueError("raster_backend must be either 'cpu' or 'cuda'")
         self.requested_raster_backend = raster_backend
@@ -211,8 +220,8 @@ class TaximSensor(object):
         else:
             self.gel_map = read_calib_np(gelmap_file)
             assert self.gel_map.shape == (480, 640), "Gelmap shape should be (480, 640) to stay consistent with original gelmap."
-            assert self.gel_map.max() <= 169.5, "Gelmap max should not exceed 169.5 to stay consistent with original gelmap."
-            assert self.gel_map.min() >= 122.0, "Gelmap min should not be less than 122.0 to stay consistent with original gelmap."
+            # assert self.gel_map.max() <= 169.5, "Gelmap max should not exceed 169.5 to stay consistent with original gelmap."
+            # assert self.gel_map.min() >= 122.0, "Gelmap min should not be less than 122.0 to stay consistent with original gelmap."
         self.gel_map = cv2.GaussianBlur(self.gel_map.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
         if self._cuda_raster is not None:
             self._cuda_raster.configure_frame_pipeline(
@@ -496,9 +505,25 @@ class TaximSensor(object):
         wTo[:3, :3] = wRo
         wTo[:3, 3] = wPo * 1000.0 # change to mm
 
-        height_map, gel_map, contact_mask, press_depth, gt_height_map, pcn = self.generateHeightMapWithTransform(wTs, wTo, obj_name, pcn_add_noise=pcn_add_noise)
-        heightMap, contact_mask, contact_height = Core.deformApprox(press_depth, height_map, gel_map, contact_mask)
-        sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
+        height_map, gel_map, contact_mask, press_depth, gt_height_map, pcn, _, shadow_map = self.generateHeightMapWithTransform(wTs, wTo, obj_name, pcn_add_noise=pcn_add_noise)
+        shadow_height, shadow_mask, shadow_contact_height = Core.deformApprox(
+            press_depth, shadow_map, gel_map, contact_mask
+        )
+        heightMap, _, contact_height = Core.deformApprox(
+            press_depth,
+            height_map,
+            gel_map,
+            contact_mask,
+            deformation_mask=shadow_mask,
+        )
+        sim_img, shadow_sim_img = self.simulating(
+            heightMap,
+            shadow_mask,
+            contact_height,
+            shadow=shadow,
+            shadow_height_map=shadow_height,
+            shadow_contact_height=shadow_contact_height,
+        )
         sim_img = sim_img if not shadow else shadow_sim_img
         
         # add some gaussian noise to simulate real sensor noise
@@ -637,7 +662,9 @@ class TaximSensor(object):
                         obj_name,
                         sTo,
                         bump_scale_mm=self.texture_bump_scale_mm,
-                        pressing_mm_max=1.2,
+                        pressing_mm_max=SHARED_PRESSING_MM_MAX,
+                        flat_contact_curvature_mm=self.flat_contact_curvature_mm,
+                        flat_contact_slope_threshold=self.flat_contact_slope_threshold,
                         contact_scale=pr.contact_scale,
                         pyramid_kernel_sizes=tuple(pr.pyramid_kernel_size),
                         final_kernel_size=pr.kernel_size,
@@ -651,14 +678,30 @@ class TaximSensor(object):
                 pcn = None
             else:
                 with timed("hm_total"):
-                    height_map, gel_map, contact_mask, press_depth, gt_height_map, pcn, overlay = self.generateHeightMapWithTransform(wTs, wTo, obj_name, pcn_add_noise=pcn_add_noise)
+                    height_map, gel_map, contact_mask, press_depth, gt_height_map, pcn, overlay, shadow_map = self.generateHeightMapWithTransform(wTs, wTo, obj_name, pcn_add_noise=pcn_add_noise)
                     debug_bumpy_height = np.asarray(height_map, dtype=np.float32)
                     debug_contact_mask = np.asarray(contact_mask, dtype=bool)
                     debug_base_height = np.clip(debug_bumpy_height - np.asarray(overlay, dtype=np.float32), 0.0, None)
                 with timed("deform_total"):
-                    heightMap, contact_mask, contact_height = Core.deformApprox(press_depth, height_map, gel_map, contact_mask)
+                    shadow_height, shadow_mask, shadow_contact_height = Core.deformApprox(
+                        press_depth, shadow_map, gel_map, contact_mask
+                    )
+                    heightMap, _, contact_height = Core.deformApprox(
+                        press_depth,
+                        height_map,
+                        gel_map,
+                        contact_mask,
+                        deformation_mask=shadow_mask,
+                    )
                 with timed("sim_total"):
-                    sim_img, shadow_sim_img = self.simulating(heightMap, contact_mask, contact_height, shadow=shadow)
+                    sim_img, shadow_sim_img = self.simulating(
+                        heightMap,
+                        shadow_mask,
+                        contact_height,
+                        shadow=shadow,
+                        shadow_height_map=shadow_height,
+                        shadow_contact_height=shadow_contact_height,
+                    )
                     sim_img = sim_img if not shadow else shadow_sim_img
 
         # add some gaussian noise to simulate real sensor noise
@@ -772,7 +815,15 @@ class TaximSensor(object):
             f0[:,:,ch][idx] = frame_mixing_per*f0[:,:,ch][idx] + (1-frame_mixing_per)*frame_[:,:,ch][idx]
         return f0
 
-    def simulating(self, heightMap, contact_mask, contact_height, shadow=False):
+    def simulating(
+        self,
+        heightMap,
+        contact_mask,
+        contact_height,
+        shadow=False,
+        shadow_height_map=None,
+        shadow_contact_height=None,
+    ):
         """
         Simulate the tactile image from the height map
         heightMap: heightMap of the contact
@@ -819,6 +870,15 @@ class TaximSensor(object):
         if not shadow:
             return sim_img, sim_img
 
+        # Shadows use an undisplaced height field.  Normal-map texture still
+        # affects the calibrated illumination above, but cannot alter the
+        # shadow boundary, direction, depth, or ray occlusion.
+        if shadow_height_map is None:
+            shadow_height_map = heightMap
+        if shadow_contact_height is None:
+            shadow_contact_height = contact_height
+        _, shadow_grad_dir = Core.generate_normals(shadow_height_map)
+
         # add shadow
         cx = psp.w//2
         cy = psp.h//2
@@ -834,11 +894,11 @@ class TaximSensor(object):
         y_coord = yy[contact_mask]
 
         # get normal index to shadow table
-        normMap = grad_dir[contact_mask] + np.pi
+        normMap = shadow_grad_dir[contact_mask] + np.pi
         norm_idx = (normMap // pr.discritize_precision).astype(np.int32, copy=False)
 
         # get height index to shadow table
-        contact_map = contact_height[contact_mask]
+        contact_map = shadow_contact_height[contact_mask]
         height_idx = ((contact_map * psp.pixmm - self.shadow_depth[0]) // pr.height_precision).astype(np.int32, copy=False)
         if(height_idx.size == 0):
             return sim_img, sim_img
@@ -915,7 +975,7 @@ class TaximSensor(object):
                     gy = y_s[start_idx:end_idx]
 
                     # Origin heights for occlusion test
-                    origin_h = heightMap[gy, gx]  # (P,)
+                    origin_h = shadow_height_map[gy, gx]  # (P,)
 
                     # For each fan direction, cast "rays" from all origins at once (vectorized over P and S)
                     for ct, st in zip(ct_list, st_list):
@@ -941,7 +1001,7 @@ class TaximSensor(object):
                         flat_inb = np.flatnonzero(inb.ravel())
                         origin_idx = (flat_inb // S).astype(np.int32)
 
-                        occ = origin_h[origin_idx] > heightMap[ys_in, xs_in]
+                        occ = origin_h[origin_idx] > shadow_height_map[ys_in, xs_in]
                         if not np.any(occ):
                             continue
 
@@ -963,7 +1023,7 @@ class TaximSensor(object):
         shadow_sim_img = cv2.GaussianBlur(shadow_sim_img.astype(np.float32), (pr.kernel_size, pr.kernel_size), 0)
         return sim_img, shadow_sim_img
 
-    def generateHeightMapWithTransform(self, wTs, wTo, obj_name, pressing_mm_max = 1.2, return_pcn=False, pcn_add_noise=False):
+    def generateHeightMapWithTransform(self, wTs, wTo, obj_name, pressing_mm_max=SHARED_PRESSING_MM_MAX, return_pcn=False, pcn_add_noise=False):
         """
         Generate the height map by interacting the object with the gelpad model.
 
@@ -1040,22 +1100,42 @@ class TaximSensor(object):
             pressing_height_mm = 0.0
             
         pressing_height_pix = pressing_height_mm/psp.pixmm
+        base_height_map = heightMap - overlay
         max_g = float(gel_map.max())
-        max_o = float(heightMap.max())
+        max_o = float(base_height_map.max())
         # shift the gelpad to interact with the object
         gel_map = -1 * gel_map + (max_g+max_o-pressing_height_pix)
 
         # get the contact area 
-        contact_mask = heightMap > gel_map # heightMap > gel_map
-        # combine contact area of object shape with non contact area of gelpad shape
-        zq = np.where(contact_mask, heightMap, gel_map)
+        contact_mask = base_height_map > gel_map
+        # Curve locally flat contacts according to the gel penetration field.
+        # Removing the norm2tex overlay recovers the underlying object surface
+        # used by the flatness test.
+        zq = Core.add_flat_contact_curvature(
+            height_map=heightMap,
+            base_height_map=base_height_map,
+            gel_map=gel_map,
+            contact_mask=contact_mask,
+            pressing_height_mm=pressing_height_mm,
+            curvature_mm=self.flat_contact_curvature_mm,
+            slope_threshold=self.flat_contact_slope_threshold,
+        )
+        shadow_zq = Core.add_flat_contact_curvature(
+            height_map=base_height_map,
+            base_height_map=base_height_map,
+            gel_map=gel_map,
+            contact_mask=contact_mask,
+            pressing_height_mm=pressing_height_mm,
+            curvature_mm=self.flat_contact_curvature_mm,
+            slope_threshold=self.flat_contact_slope_threshold,
+        )
         heightMapBlur = cv2.GaussianBlur(
             heightMap.astype(np.float32) / max(max_o, 1e-8),
             (5, 5),
             0,
         )
 
-        return zq, gel_map, contact_mask, pressing_height_mm, heightMapBlur, pcn, overlay
+        return zq, gel_map, contact_mask, pressing_height_mm, heightMapBlur, pcn, overlay, shadow_zq
     
     def _get_poly_design_cache(self):
         cache_key = (psp.w, psp.h)

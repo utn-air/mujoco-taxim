@@ -452,6 +452,8 @@ class CudaRasterBackend:
         *,
         bump_scale_mm: float,
         pressing_mm_max: float,
+        flat_contact_curvature_mm: float,
+        flat_contact_slope_threshold: float,
         contact_scale: float,
         pyramid_kernel_sizes: tuple[int, ...],
         final_kernel_size: int,
@@ -479,17 +481,78 @@ class CudaRasterBackend:
             height_2d = self.height_map.reshape(self.height, self.width)
             zbuf_2d = self.zbuf.reshape(self.height, self.width)
             overlay_2d = self.overlay.reshape(self.height, self.width)
+            base_height_2d = height_2d - overlay_2d
             min_z = cp.min(zbuf_2d)
             pressing_height_mm = cp.minimum(
                 np.float32(pressing_mm_max), cp.maximum(np.float32(0.0), -min_z)
             )
             pressing_height_pix = pressing_height_mm / self.pixmm
-            max_object_height = cp.max(height_2d)
+            max_object_height = cp.max(base_height_2d)
             gel_interacted = -self.gel_map + (
                 self.max_gel_height + max_object_height - pressing_height_pix
             )
-            contact_mask = height_2d > gel_interacted
+            # Contact and deformation geometry come from the undisplaced mesh.
+            # The normal map changes appearance only; it must not change the
+            # footprint or any of the shadow calculations.
+            contact_mask = base_height_2d > gel_interacted
             deformed = cp.where(contact_mask, height_2d, gel_interacted)
+            shadow_deformed = cp.where(
+                contact_mask, base_height_2d, gel_interacted
+            )
+            if flat_contact_curvature_mm > 0.0:
+                # Test the undisplaced object surface so that norm2tex details
+                # do not make a flat face appear geometrically curved.
+                interior_mask = self.cuda_ndimage.minimum_filter(
+                    contact_mask.astype(cp.uint8),
+                    size=3,
+                    mode="constant",
+                    cval=0,
+                ) != 0
+                grad_y = self.cuda_ndimage.sobel(
+                    base_height_2d, axis=0, mode="mirror"
+                ) * np.float32(0.125)
+                grad_x = self.cuda_ndimage.sobel(
+                    base_height_2d, axis=1, mode="mirror"
+                ) * np.float32(0.125)
+                surface_slope = cp.hypot(grad_x, grad_y)
+                has_interior = cp.any(interior_mask)
+                max_contact_slope = cp.max(
+                    cp.where(interior_mask, surface_slope, np.float32(0.0))
+                )
+                flat_contact = has_interior & (
+                    max_contact_slope
+                    <= np.float32(flat_contact_slope_threshold)
+                )
+
+                penetration_weight = cp.clip(
+                    (base_height_2d - gel_interacted)
+                    / cp.maximum(pressing_height_pix, np.float32(1e-8)),
+                    np.float32(0.0),
+                    np.float32(1.0),
+                )
+                penetration_weight = (
+                    penetration_weight
+                    * penetration_weight
+                    * (np.float32(3.0) - np.float32(2.0) * penetration_weight)
+                )
+                cap_amplitude_mm = cp.minimum(
+                    np.float32(flat_contact_curvature_mm), pressing_height_mm
+                )
+                cap_height = (
+                    penetration_weight * cap_amplitude_mm / self.pixmm
+                )
+                curved_height = height_2d + cp.where(
+                    flat_contact, cap_height, np.float32(0.0)
+                )
+                shadow_curved_height = base_height_2d + cp.where(
+                    flat_contact, cap_height, np.float32(0.0)
+                )
+                deformed = cp.where(
+                    contact_mask, curved_height, gel_interacted
+                )
+                shadow_deformed = cp.where(
+                    contact_mask, shadow_curved_height, gel_interacted
+                )
             normalized_height = height_2d / cp.maximum(
                 max_object_height, np.float32(1e-8)
             )
@@ -497,15 +560,25 @@ class CudaRasterBackend:
             stage_events[1].record(self.stream)
 
             original = deformed.copy()
+            shadow_original = shadow_deformed.copy()
             deformation_mask = (
-                (deformed - gel_interacted)
+                (shadow_deformed - gel_interacted)
                 > pressing_height_pix * np.float32(contact_scale)
             ) & contact_mask
             for kernel_size in pyramid_kernel_sizes:
                 deformed = self._gaussian_blur(deformed, int(kernel_size))
                 deformed = cp.where(deformation_mask, original, deformed)
+                shadow_deformed = self._gaussian_blur(
+                    shadow_deformed, int(kernel_size)
+                )
+                shadow_deformed = cp.where(
+                    deformation_mask, shadow_original, shadow_deformed
+                )
             deformed = self._gaussian_blur(deformed, int(final_kernel_size))
-            contact_height = deformed - gel_interacted
+            shadow_deformed = self._gaussian_blur(
+                shadow_deformed, int(final_kernel_size)
+            )
+            shadow_contact_height = shadow_deformed - gel_interacted
             stage_events[2].record(self.stream)
 
             self.simulate_kernel(
@@ -527,18 +600,20 @@ class CudaRasterBackend:
             output_image = self.lit_image
             if shadow:
                 enlarged_mask = self.cuda_ndimage.maximum_filter(
-                    contact_mask.astype(cp.uint8), size=9, mode="constant", cval=0
+                    deformation_mask.astype(cp.uint8),
+                    size=9,
+                    mode="constant",
+                    cval=0,
                 )
-                shadow_boundary = (enlarged_mask != 0) & ~contact_mask
+                shadow_boundary = (enlarged_mask != 0) & ~deformation_mask
                 cp.copyto(self.shadow_image, self.raw_image)
                 self.shadow_kernel(
                     (pixel_blocks,),
                     (self._PIXEL_THREADS,),
                     (
                         shadow_boundary,
-                        self.gradient_direction,
-                        contact_height,
-                        deformed,
+                        shadow_contact_height,
+                        shadow_deformed,
                         self.shadow_fan_cosines,
                         self.shadow_fan_sines,
                         self.shadow_fan_lengths,

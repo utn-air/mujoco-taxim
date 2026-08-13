@@ -53,13 +53,22 @@ def interpolate(img):
     
     return GD1
 
-def deformApprox(pressing_height_mm, height_map, gel_map, contact_mask):
+def deformApprox(
+    pressing_height_mm,
+    height_map,
+    gel_map,
+    contact_mask,
+    deformation_mask=None,
+):
     zq = height_map.copy()
     zq_back = zq.copy()
     pressing_height_pix = pressing_height_mm/psp.pixmm
-    # contact mask which is a little smaller than the real contact mask
-    mask = (zq-(gel_map)) > pressing_height_pix * pr.contact_scale
-    mask = mask & contact_mask
+    if deformation_mask is None:
+        # Contact core that remains fixed during the pyramid deformation.
+        mask = (zq-(gel_map)) > pressing_height_pix * pr.contact_scale
+        mask = mask & contact_mask
+    else:
+        mask = np.asarray(deformation_mask, dtype=bool) & contact_mask
 
     # approximate soft body deformation with pyramid gaussian_filter
     for i in range(len(pr.pyramid_kernel_size)):
@@ -68,6 +77,70 @@ def deformApprox(pressing_height_mm, height_map, gel_map, contact_mask):
     zq = cv2.GaussianBlur(zq.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
     contact_height = zq - gel_map
     return zq, mask, contact_height
+
+
+def add_flat_contact_curvature(
+    height_map,
+    base_height_map,
+    gel_map,
+    contact_mask,
+    pressing_height_mm,
+    curvature_mm,
+    slope_threshold,
+):
+    """Add a gel-centered cap when the contacting object surface is flat.
+
+    Height maps use pixels as their vertical unit.  ``base_height_map`` is the
+    undisplaced object surface, which prevents a norm2tex bump map from making
+    an otherwise flat face fail the flatness test.  The cap follows the local
+    object/gel penetration, so it peaks at the gel center and tapers to zero at
+    the contact boundary.
+    """
+    interacted = np.where(contact_mask, height_map, gel_map)
+    if curvature_mm <= 0.0 or pressing_height_mm <= 0.0:
+        return interacted
+
+    contact_mask = np.asarray(contact_mask, dtype=bool)
+    if not np.any(contact_mask):
+        return interacted
+
+    # Ignore the raster/contact boundary when deciding whether the underlying
+    # object face is flat; that boundary is necessarily a large depth step.
+    interior_mask = cv2.erode(
+        contact_mask.astype(np.uint8),
+        np.ones((3, 3), dtype=np.uint8),
+        iterations=1,
+    ).astype(bool)
+    if not np.any(interior_mask):
+        return interacted
+
+    base_height_map = np.asarray(base_height_map, dtype=np.float32)
+    grad_x = cv2.Sobel(
+        base_height_map, cv2.CV_32F, 1, 0, ksize=3, scale=0.125
+    )
+    grad_y = cv2.Sobel(
+        base_height_map, cv2.CV_32F, 0, 1, ksize=3, scale=0.125
+    )
+    max_contact_slope = float(
+        np.max(np.hypot(grad_x[interior_mask], grad_y[interior_mask]))
+    )
+    if max_contact_slope > slope_threshold:
+        return interacted
+
+    pressing_height_pix = pressing_height_mm / psp.pixmm
+    penetration_weight = np.clip(
+        (base_height_map - gel_map) / max(pressing_height_pix, 1e-8),
+        0.0,
+        1.0,
+    )
+    # Smoothstep gives a sphere-like center without a derivative discontinuity
+    # where the correction reaches the contact boundary.
+    penetration_weight = penetration_weight * penetration_weight * (
+        3.0 - 2.0 * penetration_weight
+    )
+    cap_amplitude_mm = min(float(curvature_mm), float(pressing_height_mm))
+    cap_height = penetration_weight * (cap_amplitude_mm / psp.pixmm)
+    return np.where(contact_mask, height_map + cap_height, gel_map)
 
 @njit(cache=True)
 def zbuf_rasterize_numba(us, vs, zs, H, W):

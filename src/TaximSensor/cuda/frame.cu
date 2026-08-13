@@ -74,7 +74,6 @@ extern "C" __global__ void simulate_pixels(
 
 extern "C" __global__ void cast_shadows(
     const unsigned char *shadow_boundary,
-    const float *gradient_direction,
     const float *contact_height,
     const float *height_map,
     const float *fan_cosines,
@@ -102,8 +101,22 @@ extern "C" __global__ void cast_shadows(
     }
 
     const float pi = 3.14159265358979323846f;
+    const int x = idx % width;
+    const int y = idx / width;
+    const int cx = x < 1 ? 1 : (x > width - 2 ? width - 2 : x);
+    const int cy = y < 1 ? 1 : (y > height - 2 ? height - 2 : y);
+    const float top = height_map[(cy - 1) * width + cx];
+    const float bottom = height_map[(cy + 1) * width + cx];
+    const float left = height_map[cy * width + cx - 1];
+    const float right = height_map[cy * width + cx + 1];
+    const float dzdx = 0.5f * (bottom - top);
+    const float dzdy = 0.5f * (right - left);
+    const float tangent = sqrtf(dzdx * dzdx + dzdy * dzdy);
+    const float gradient_direction = tangent == 0.0f
+        ? 0.0f
+        : atan2f(dzdx / tangent, dzdy / tangent);
     const int normal_idx = (int)floorf(
-        (gradient_direction[idx] + pi) / direction_precision
+        (gradient_direction + pi) / direction_precision
     );
     const int height_idx = (int)floorf(
         (contact_height[idx] * pixmm - shadow_depth_min) / height_precision
@@ -113,8 +126,8 @@ extern "C" __global__ void cast_shadows(
         return;
     }
 
-    const int origin_x = idx % width;
-    const int origin_y = idx / width;
+    const int origin_x = x;
+    const int origin_y = y;
     const float origin_height = height_map[idx];
     const int fan_count = fan_lengths[normal_idx];
 

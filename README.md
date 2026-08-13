@@ -16,6 +16,26 @@ MuJoCo-Taxim can be easily dropped into an existing MuJoCo application/scene.
 Check `examples/mujoco` for a detailed use case on how to achieve this.
 Currently, MuJoCo-Taxim can only simulate the tactile image of one object in a given step, but doing multi-geom simulation is planned.
 
+### Flat-contact curvature
+
+Flat object faces can optionally receive a small gel-centered curvature before
+deformation and illumination. This models the dome-shaped response of the
+silicone pad while leaving already-curved object surfaces unchanged:
+
+```python
+sensor = TaximSensor(
+    sensor_type="digit",
+    flat_contact_curvature_mm=0.1,
+    flat_contact_slope_threshold=0.01,
+)
+```
+
+The curvature follows the configured gel map, peaks at the center of the
+contact, and tapers to zero at its boundary. Set
+`flat_contact_curvature_mm=0.0` (the library default) to disable it. The MuJoCo
+recorder enables a 0.1 mm cap by default and exposes both values as command-line
+options.
+
 ## Normal map-based texture support
 This branch now supports using normal maps to inject additional texture into the rendered Taxim image, allowing for richer tactile image simulation. 
 

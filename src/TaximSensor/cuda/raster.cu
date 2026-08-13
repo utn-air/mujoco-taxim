@@ -318,28 +318,10 @@ extern "C" __global__ void erode_and_merge(
         return;
     }
 
-    const int x = idx % width;
-    const int y = idx / width;
-    bool valid = displaced_valid[idx] != 0;
-    for (int dy = -1; dy <= 1 && valid; ++dy) {
-        const int ny = y + dy;
-        if (ny < 0 || ny >= height) {
-            continue;
-        }
-        for (int dx = -1; dx <= 1; ++dx) {
-            const int nx = x + dx;
-            if (nx < 0 || nx >= width) {
-                continue;
-            }
-            if (displaced_valid[ny * width + nx] == 0) {
-                valid = false;
-                break;
-            }
-        }
-    }
-
     const float base = base_height[idx];
-    const float result = valid ? displaced_height[idx] : base;
+    const float result = displaced_valid[idx] != 0
+        ? displaced_height[idx]
+        : base;
     height_map[idx] = result;
     overlay[idx] = result - base;
 }
