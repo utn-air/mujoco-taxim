@@ -39,7 +39,7 @@ _exported_dunders = {
     "__version__",
 }
 
-SHARED_PRESSING_MM_MAX = 1.2
+SHARED_PRESSING_MM_MAX = 1.5
 
 def _depth_map_path_from_normal_map(normal_map_path: str | Path) -> Path:
     normal_path = Path(normal_map_path)
